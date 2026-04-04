@@ -1,0 +1,37 @@
+[package]
+name = "lowspec_backend"
+version = "0.1.0"
+edition = "2021"
+
+# HTTP/3 は対象外。リリースバイナリのサイズ・最適化のみ（改修案 P7 から HTTP/3 除いた部分）
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[dependencies]
+anyhow = "1"
+argon2 = { version = "0.5", features = ["std"] }
+arrow-ipc = "58"
+base64 = "0.22"
+async-graphql = { version = "7", features = ["dataloader"] }
+async-graphql-axum = "7"
+async-trait = "0.1"
+axum = "0.8"
+deadpool = "0.13"
+deadpool-sqlite = { version = "0.13", features = ["bundled", "rt_tokio_1"] }
+dotenvy = "0.15"
+duckdb = { version = "1.1", features = ["bundled"] }
+hex = "0.4"
+jsonwebtoken = "9"
+moka = { version = "0.12", features = ["future"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["serde-well-known"] }
+tokio = { version = "1", features = ["full", "sync"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-sessions = { version = "0.15", default-features = false, features = ["axum-core"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+zstd = "0.13"

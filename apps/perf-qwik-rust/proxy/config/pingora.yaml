@@ -1,0 +1,8 @@
+# Pingora サーバプロセス設定（ServerConf）
+# コンテナでは `-c /etc/pingora/pingora.yaml` で読み込み。
+# リスンアドレスや upstream は環境変数 PERF_PROXY_*（README 参照）。
+
+version: 1
+daemon: false
+threads: 2
+work_stealing: true

@@ -1,0 +1,79 @@
+# ── 依存・パッケージマネージャ ─────────────────────────────
+node_modules/
+
+# ── 環境変数・ローカル設定（*.example はコミットする）────────
+.env
+.env.*
+!.env.example
+
+# ── Rust（Cargo ビルド成果物）──────────────────────────────
+target/
+**/*.rs.bk
+
+# ── フロントビルド出力 ─────────────────────────────────────
+dist/
+out/
+build/
+.next/
+# Qwik（server 側ビルド・型出力）
+**/server/
+**/lib-types/
+
+# ── ローカル DB・埋め込み DB（実行時に生成）──────────────────
+# SQLite（WAL モードの付帯ファイル含む）
+*.db
+*.db-wal
+*.db-shm
+# DuckDB（lowspec コンテンツ DB 等）
+*.duckdb
+*.duckdb.wal
+# 旧パターン互換（削除してもよい）
+**/lowspec.db*
+
+# ── 仕様書（ローカル用・追跡しない）──────────────────────────
+specs/
+
+# ── ベンチマーク・計測結果（生成 JSON）──────────────────────
+benchmarks/results/*.json
+!benchmarks/results/.gitkeep
+
+# ── Python（tools/ 等）────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+.envrc
+
+# ── ログ・キャッシュ・一時ファイル ─────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.cache/
+.mf/
+.rollup.cache/
+.turbo/
+.nx/cache
+.nx/workspace-data
+*.tsbuildinfo
+coverage/
+.nyc_output/
+
+# ── OS ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── エディタ（共有したい設定は negation で個別に）────────────
+.idea/
+*.swp
+*.swo
+*~
+
+# ── TLS・秘密鍵の誤コミット防止 ─────────────────────────────
+*.pem
+*.key
+!**/*.key.example

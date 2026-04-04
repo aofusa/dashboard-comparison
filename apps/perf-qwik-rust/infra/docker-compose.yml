@@ -1,0 +1,55 @@
+# perf-qwik-rust ローカル依存: MySQL / Dragonfly / Scylla Alternator + Pingora（HTTP/1.1 リバースプロキシ）
+# 起動例: cd apps/perf-qwik-rust/infra && docker compose up -d
+# 手順の SSOT: specs/artifacts/perf-qwik-rust-alternator-local_20260406.md
+#
+# pingora: 外向き :9080 → ホスト上の Axum :8080（`host.docker.internal`）。バックエンドを別コンテナにする場合は PERF_PROXY_UPSTREAM を書き換え。
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: perfroot
+      MYSQL_DATABASE: perf_meta
+    ports:
+      - "3306:3306"
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pperfroot"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    ports:
+      - "6379:6379"
+    ulimits:
+      memlock: -1
+
+  scylla:
+    image: scylladb/scylla:6.2
+    ports:
+      - "8000:8000"
+      - "9042:9042"
+    command: --smp 1 --memory 1G --overprovisioned 1 --api-address 0.0.0.0 --alternator-port 8000 --alternator-write-isolation only_rmw_uses_lwt
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+
+  pingora:
+    build:
+      context: ../proxy
+      dockerfile: Dockerfile
+    ports:
+      - "9080:9080"
+    environment:
+      RUST_LOG: info
+      # ホストで `cargo run` している perf_backend 向け（Linux は extra_hosts 必須）
+      PERF_PROXY_UPSTREAM: host.docker.internal:8080
+      PERF_PROXY_UPSTREAM_HOST: host.docker.internal
+      PERF_PROXY_HTTP_LISTEN: 0.0.0.0:9080
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

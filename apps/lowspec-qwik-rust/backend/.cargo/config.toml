@@ -1,0 +1,4 @@
+# DuckDB（libduckdb-sys）のネイティブビルドはメモリを多く使うため、既定で並列 1。
+# 環境変数 CARGO_BUILD_JOBS があればそちらが優先されます。
+[build]
+jobs = 1
