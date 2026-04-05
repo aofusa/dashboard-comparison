@@ -83,16 +83,25 @@ impl ContentRepository for MokaCachedContent {
         self.inner.list_item_ids(user_id).await
     }
 
-    async fn create_item(&self, user_id: &str, title: &str) -> anyhow::Result<String> {
-        let id = self.inner.create_item(user_id, title).await?;
-        self.cache.invalidate_all();
-        Ok(id)
+    async fn get_item(&self, user_id: &str, id: &str) -> anyhow::Result<Option<ItemRow>> {
+        self.inner.get_item(user_id, id).await
     }
 
-    async fn update_item(&self, user_id: &str, id: &str, title: &str) -> anyhow::Result<bool> {
-        let ok = self.inner.update_item(user_id, id, title).await?;
+    async fn create_item(&self, user_id: &str, title: &str) -> anyhow::Result<ItemRow> {
+        let row = self.inner.create_item(user_id, title).await?;
         self.cache.invalidate_all();
-        Ok(ok)
+        Ok(row)
+    }
+
+    async fn update_item(
+        &self,
+        user_id: &str,
+        id: &str,
+        title: &str,
+    ) -> anyhow::Result<Option<ItemRow>> {
+        let row = self.inner.update_item(user_id, id, title).await?;
+        self.cache.invalidate_all();
+        Ok(row)
     }
 
     async fn delete_item(&self, user_id: &str, id: &str) -> anyhow::Result<bool> {

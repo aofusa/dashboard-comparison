@@ -8,9 +8,22 @@ use std::thread;
 use anyhow::Context;
 use async_trait::async_trait;
 use duckdb::params;
-use tracing::error;
+use tracing::{error, warn};
+
+/// `(id, title, user_id, updated_at_iso)`
+pub type ItemRow = (String, String, String, Option<String>);
 
 type RowsAffectedTx = std::sync::mpsc::Sender<anyhow::Result<usize>>;
+type ItemRowTx = std::sync::mpsc::Sender<anyhow::Result<ItemRow>>;
+type ItemRowOptTx = std::sync::mpsc::Sender<anyhow::Result<Option<ItemRow>>>;
+
+/// 読み取り専用コネクションの `list_item_ids` / `items_slice` が WAL 直後に追いつかないと、
+/// フロントの `itemsDbReconcileIds` が新規行を誤削除するため、書き込み後に WAL を同期する。
+fn content_writer_checkpoint(conn: &duckdb::Connection) {
+    if let Err(e) = conn.execute("CHECKPOINT", []) {
+        warn!(error = %e, "content db CHECKPOINT after write");
+    }
+}
 
 #[derive(Debug)]
 enum ContentWrite {
@@ -19,12 +32,13 @@ enum ContentWrite {
         id: String,
         user_id: String,
         title: String,
+        reply: ItemRowTx,
     },
     UpdateItem {
         id: String,
         user_id: String,
         title: String,
-        reply: RowsAffectedTx,
+        reply: ItemRowOptTx,
     },
     DeleteItem {
         id: String,
@@ -69,13 +83,51 @@ impl ContentWriter {
                             error!("content db exec: {e}");
                         }
                     }
-                    ContentWrite::CreateItem { id, user_id, title } => {
-                        if let Err(e) = conn.execute(
-                            "INSERT INTO items (id, user_id, title, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-                            params![id, user_id, title],
-                        ) {
-                            error!("content db insert: {e}");
+                    ContentWrite::CreateItem {
+                        id,
+                        user_id,
+                        title,
+                        reply,
+                    } => {
+                        let res = (|| -> anyhow::Result<ItemRow> {
+                            let n = conn
+                                .execute(
+                                    "INSERT INTO items (id, user_id, title, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                                    params![&id, &user_id, &title],
+                                )
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            if n == 0 {
+                                anyhow::bail!("create_item: no row inserted");
+                            }
+                            let mut stmt = conn
+                                .prepare(
+                                    "SELECT id, title, user_id, \
+                                     CASE WHEN updated_at IS NULL THEN NULL ELSE CAST(updated_at AS VARCHAR) END \
+                                     FROM items WHERE id = ? AND user_id = ?",
+                                )
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            let mut rows = stmt
+                                .query(params![id.as_str(), user_id.as_str()])
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            let Some(row) = rows.next().map_err(|e| anyhow::anyhow!("{e}"))? else {
+                                warn!(
+                                    user_id = %user_id,
+                                    item_id = %id,
+                                    "create_item: row missing after insert on writer connection"
+                                );
+                                anyhow::bail!("create_item: row missing after insert");
+                            };
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                            ))
+                        })();
+                        if res.is_ok() {
+                            content_writer_checkpoint(&conn);
                         }
+                        let _ = reply.send(res);
                     }
                     ContentWrite::UpdateItem {
                         id,
@@ -83,12 +135,44 @@ impl ContentWriter {
                         title,
                         reply,
                     } => {
-                        let res = conn
-                            .execute(
-                                "UPDATE items SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?",
-                                params![title, id, user_id],
-                            )
-                            .map_err(|e| anyhow::anyhow!("{e}"));
+                        let res = (|| -> anyhow::Result<Option<ItemRow>> {
+                            let n = conn
+                                .execute(
+                                    "UPDATE items SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?",
+                                    params![&title, &id, &user_id],
+                                )
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            if n == 0 {
+                                return Ok(None);
+                            }
+                            let mut stmt = conn
+                                .prepare(
+                                    "SELECT id, title, user_id, \
+                                     CASE WHEN updated_at IS NULL THEN NULL ELSE CAST(updated_at AS VARCHAR) END \
+                                     FROM items WHERE id = ? AND user_id = ?",
+                                )
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            let mut rows = stmt
+                                .query(params![id.as_str(), user_id.as_str()])
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            let Some(row) = rows.next().map_err(|e| anyhow::anyhow!("{e}"))? else {
+                                warn!(
+                                    user_id = %user_id,
+                                    item_id = %id,
+                                    "update_item: row missing after update on writer connection"
+                                );
+                                anyhow::bail!("update_item: row missing after update");
+                            };
+                            Ok(Some((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                            )))
+                        })();
+                        if matches!(res, Ok(Some(_))) {
+                            content_writer_checkpoint(&conn);
+                        }
                         let _ = reply.send(res);
                     }
                     ContentWrite::DeleteItem { id, user_id, reply } => {
@@ -98,6 +182,9 @@ impl ContentWriter {
                                 params![id, user_id],
                             )
                             .map_err(|e| anyhow::anyhow!("{e}"));
+                        if matches!(&res, Ok(n) if *n > 0) {
+                            content_writer_checkpoint(&conn);
+                        }
                         let _ = reply.send(res);
                     }
                 }
@@ -113,11 +200,24 @@ impl ContentWriter {
         Ok(())
     }
 
-    pub fn create_item(&self, id: String, user_id: String, title: String) -> anyhow::Result<()> {
+    pub fn create_item_blocking(
+        &self,
+        id: String,
+        user_id: String,
+        title: String,
+    ) -> anyhow::Result<ItemRow> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         self.tx
-            .send(ContentWrite::CreateItem { id, user_id, title })
+            .send(ContentWrite::CreateItem {
+                id,
+                user_id,
+                title,
+                reply: reply_tx,
+            })
             .map_err(|_| anyhow::anyhow!("content writer channel closed"))?;
-        Ok(())
+        reply_rx
+            .recv()
+            .map_err(|_| anyhow::anyhow!("content writer reply closed"))?
     }
 
     pub fn update_item_blocking(
@@ -125,7 +225,7 @@ impl ContentWriter {
         id: String,
         user_id: String,
         title: String,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<Option<ItemRow>> {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         self.tx
             .send(ContentWrite::UpdateItem {
@@ -155,8 +255,6 @@ impl ContentWriter {
     }
 }
 
-pub type ItemRow = (String, String, String, Option<String>);
-
 #[async_trait]
 pub trait ContentRepository: Send + Sync {
     async fn count_items(&self, user_id: &str) -> anyhow::Result<i64>;
@@ -176,8 +274,17 @@ pub trait ContentRepository: Send + Sync {
     async fn item_title_initial_stats(&self, user_id: &str) -> anyhow::Result<Vec<(String, i64)>>;
     /// 当該ユーザーの全 item id（削除伝播・リコンシリ用）。キャッシュしない実装を推奨。
     async fn list_item_ids(&self, user_id: &str) -> anyhow::Result<Vec<String>>;
-    async fn create_item(&self, user_id: &str, title: &str) -> anyhow::Result<String>;
-    async fn update_item(&self, user_id: &str, id: &str, title: &str) -> anyhow::Result<bool>;
+    /// 単一行取得（更新直後の応答用。キャッシュを挟まない実装を推奨）。
+    async fn get_item(&self, user_id: &str, id: &str) -> anyhow::Result<Option<ItemRow>>;
+    /// 挿入直後の行（ライター接続上で SELECT 済み）。
+    async fn create_item(&self, user_id: &str, title: &str) -> anyhow::Result<ItemRow>;
+    /// 更新後の行。該当なしのとき `None`。
+    async fn update_item(
+        &self,
+        user_id: &str,
+        id: &str,
+        title: &str,
+    ) -> anyhow::Result<Option<ItemRow>>;
     async fn delete_item(&self, user_id: &str, id: &str) -> anyhow::Result<bool>;
 }
 
@@ -335,20 +442,55 @@ impl ContentRepository for DuckDbContentRepository {
         .await?
     }
 
-    async fn create_item(&self, user_id: &str, title: &str) -> anyhow::Result<String> {
-        let id = uuid::Uuid::new_v4().to_string();
-        self.writer
-            .create_item(id.clone(), user_id.to_string(), title.to_string())?;
-        Ok(id)
+    async fn get_item(&self, user_id: &str, id: &str) -> anyhow::Result<Option<ItemRow>> {
+        let uid = user_id.to_string();
+        let iid = id.to_string();
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let c = duckdb::Connection::open(path.as_str()).context("content duckdb open")?;
+            let mut stmt = c
+                .prepare(
+                    "SELECT id, title, user_id, \
+                     CASE WHEN updated_at IS NULL THEN NULL ELSE CAST(updated_at AS VARCHAR) END \
+                     FROM items WHERE id = ? AND user_id = ?",
+                )
+                .context("prepare get_item")?;
+            let mut rows = stmt
+                .query(params![iid.as_str(), uid.as_str()])
+                .context("query get_item")?;
+            let Some(row) = rows.next().context("get_item row")? else {
+                return Ok(None);
+            };
+            Ok(Some((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+            )))
+        })
+        .await?
     }
 
-    async fn update_item(&self, user_id: &str, id: &str, title: &str) -> anyhow::Result<bool> {
+    async fn create_item(&self, user_id: &str, title: &str) -> anyhow::Result<ItemRow> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let w = self.writer.clone();
+        let uid = user_id.to_string();
+        let tid = id;
+        let ttitle = title.to_string();
+        tokio::task::spawn_blocking(move || w.create_item_blocking(tid, uid, ttitle)).await?
+    }
+
+    async fn update_item(
+        &self,
+        user_id: &str,
+        id: &str,
+        title: &str,
+    ) -> anyhow::Result<Option<ItemRow>> {
         let w = self.writer.clone();
         let id = id.to_string();
         let uid = user_id.to_string();
         let title = title.to_string();
-        let n = tokio::task::spawn_blocking(move || w.update_item_blocking(id, uid, title)).await??;
-        Ok(n > 0)
+        tokio::task::spawn_blocking(move || w.update_item_blocking(id, uid, title)).await?
     }
 
     async fn delete_item(&self, user_id: &str, id: &str) -> anyhow::Result<bool> {

@@ -385,15 +385,15 @@ impl MutationRoot {
             .ok_or_else(|| GqlError::new("Unauthorized").extend_with(|_, e| {
                 e.set("code", 401);
             }))?;
-        let id = content
+        let row = content
             .create_item(&uid.0, &title)
             .await
             .map_err(|e| GqlError::new(e.to_string()))?;
         Ok(GqlItem {
-            id,
-            title,
-            user_id: uid.0.clone(),
-            updated_at: None,
+            id: row.0,
+            title: row.1,
+            user_id: row.2,
+            updated_at: row.3,
         })
     }
 
@@ -411,30 +411,20 @@ impl MutationRoot {
             .ok_or_else(|| GqlError::new("Unauthorized").extend_with(|_, e| {
                 e.set("code", 401);
             }))?;
-        let ok = content
+        let row = content
             .update_item(&uid.0, &id, &title)
             .await
-            .map_err(|e| GqlError::new(e.to_string()))?;
-        if !ok {
-            return Err(
+            .map_err(|e| GqlError::new(e.to_string()))?
+            .ok_or_else(|| {
                 GqlError::new("not found").extend_with(|_, e| {
                     e.set("code", 404);
-                }),
-            );
-        }
-        let rows = content
-            .list_items(&uid.0, 1_000_000, 0)
-            .await
-            .map_err(|e| GqlError::new(e.to_string()))?;
-        let found = rows
-            .into_iter()
-            .find(|(rid, _, _, _)| rid == &id)
-            .ok_or_else(|| GqlError::new("not found"))?;
+                })
+            })?;
         Ok(GqlItem {
-            id: found.0,
-            title: found.1,
-            user_id: found.2,
-            updated_at: found.3,
+            id: row.0,
+            title: row.1,
+            user_id: row.2,
+            updated_at: row.3,
         })
     }
 
@@ -447,10 +437,18 @@ impl MutationRoot {
             .ok_or_else(|| GqlError::new("Unauthorized").extend_with(|_, e| {
                 e.set("code", 401);
             }))?;
-        content
+        let ok = content
             .delete_item(&uid.0, &id)
             .await
-            .map_err(|e| GqlError::new(e.to_string()))
+            .map_err(|e| GqlError::new(e.to_string()))?;
+        if !ok {
+            return Err(
+                GqlError::new("not found").extend_with(|_, e| {
+                    e.set("code", 404);
+                }),
+            );
+        }
+        Ok(true)
     }
 }
 
