@@ -4,121 +4,49 @@ import {
   useComputed$,
   useOnWindow,
   useSignal,
-  useTask$,
   useVisibleTask$,
 } from "@builder.io/qwik";
-import {
-  type DocumentHead,
-  routeLoader$,
-} from "@builder.io/qwik-city";
+import { type DocumentHead, routeLoader$ } from "@builder.io/qwik-city";
+import { ItemRowActions } from "~/components/dashboard/ItemRowActions";
 import { Button, Input, Label, Modal } from "~/components/ui";
 import {
   apiItemCreate,
   apiItemDelete,
   apiItemUpdate,
-  apiItemsArrowBuffer,
   apiItemsIdSet,
-  apiItemsList,
-  apiItemsStats,
   apiItemsUpdatedAfter,
   type ItemRow,
   type ItemsStats,
 } from "~/lib/api";
-import { tryWriteArrowIpcToOpfs } from "~/lib/opfsArrowCache";
 import {
-  type ArrowPreview,
-  decodeArrowZstdFull,
-} from "~/lib/arrowZstd";
+  applyFullResyncFromPrefetch,
+  startArrowIpcPrefetch,
+} from "~/lib/dashboardArrowPrefetch";
 import {
-  type DuckdbArrowSmokeResult,
-  queryArrowIpcSmoke,
-} from "~/lib/duckdbWasm";
+  itemsDbApplyDelta,
+  itemsDbApplyMutation,
+  itemsDbGetMaxUpdatedAt,
+  itemsDbInit,
+  itemsDbQueryStats,
+  itemsDbQueryWindow,
+  itemsDbReconcileIds,
+  itemsDbRowCount,
+  namespaceFromAccessToken,
+} from "~/lib/itemsDbClient";
+import { getAccessToken } from "~/lib/auth";
 
 type ItemModal = "none" | "create" | "edit" | "delete";
 
 const VIRT_ROW = 48;
 const VIRT_VIEW = 440;
-const APP_ITEMS_LIMIT = 65535;
 
-const APP_DASHBOARD_GQL = `
-  query AppDashboardLoader($limit: Int!) {
-    slice: itemsSlice(limit: $limit, offset: 0) {
-      items { id title updatedAt }
-    }
-    stats: itemStats {
-      total
-      byInitial { letter count }
-    }
-  }
-`;
-
-/** Cookie セッション付きなら SSR / Link 遷移で一覧取得。JWT のみの初回は `needClient` になりクライアントで `reload`。 */
-export const useAppDashboardLoader = routeLoader$(async (ev) => {
-  const origin = ev.url.origin;
-  const cookie = ev.request.headers.get("cookie") ?? "";
-  const headers: HeadersInit = {
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    ...(cookie ? { Cookie: cookie } : {}),
-  };
-  const res = await fetch(new URL("/api/graphql", origin), {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      query: APP_DASHBOARD_GQL,
-      variables: { limit: APP_ITEMS_LIMIT },
-      operationName: "AppDashboardLoader",
-    }),
-  });
-  if (res.status === 401) {
-    return { ok: false as const, needClient: true };
-  }
-  type GqlErr = { message: string; extensions?: { code?: number } };
-  let j: {
-    data?: {
-      slice: {
-        items: { id: string; title: string; updatedAt?: string | null }[];
-      };
-      stats: {
-        total: number;
-        byInitial: { letter: string; count: number }[];
-      };
-    };
-    errors?: GqlErr[];
-  };
-  try {
-    j = (await res.json()) as typeof j;
-  } catch {
-    return { ok: false as const, needClient: true };
-  }
-  if (j.errors?.length) {
-    const unauth = j.errors.some((e) => e.extensions?.code === 401);
-    if (unauth) return { ok: false as const, needClient: true };
-    return { ok: false as const, needClient: true };
-  }
-  if (!res.ok || !j.data) {
-    return { ok: false as const, needClient: true };
-  }
-  const items: ItemRow[] = j.data.slice.items.map((r) => ({
-    id: r.id,
-    title: r.title,
-    updated_at: r.updatedAt ?? null,
-  }));
-  const stats: ItemsStats | null = j.data.stats
-    ? {
-        total: j.data.stats.total,
-        by_initial: j.data.stats.byInitial.map((b) => ({
-          letter: b.letter,
-          count: b.count,
-        })),
-      }
-    : null;
-  return { ok: true as const, items, stats };
+/** SSR では DuckDB を使わない。実データはクライアントで Worker 初期化後に DuckDB SSOT へ載せる。 */
+export const useAppDashboardLoader = routeLoader$(async () => {
+  return { ok: true as const };
 });
 
 export default component$(() => {
   const loaderData = useAppDashboardLoader();
-  const items = useSignal<ItemRow[]>([]);
   const loadError = useSignal("");
   const busy = useSignal(false);
   const filter = useSignal("");
@@ -126,142 +54,174 @@ export default component$(() => {
   const sortAsc = useSignal(true);
   const stats = useSignal<ItemsStats | null>(null);
   const virtScrollTop = useSignal(0);
+  /** DuckDB queryWindow の結果（仮想ウィンドウ分のみ） */
+  const windowRows = useSignal<ItemRow[]>([]);
+  const windowTotal = useSignal(0);
+  const dbReady = useSignal(false);
   const modal = useSignal<ItemModal>("none");
   const modalOpen = useSignal(false);
   const editId = useSignal<string | null>(null);
   const draftTitle = useSignal("");
   const actionError = useSignal("");
-  const arrowHint = useSignal("");
-  const arrowPreview = useSignal<ArrowPreview | null>(null);
-  /** 最後に取得した Arrow IPC ストリーム（Zstd 展開後）。DuckDB 投入用。 */
-  const arrowIpcRaw = useSignal<Uint8Array | null>(null);
-  const duckdbHint = useSignal("");
-  const duckdbResult = useSignal<DuckdbArrowSmokeResult | null>(null);
 
-  const reload = $(async () => {
+  const virtPad = useComputed$(() => {
+    const st = virtScrollTop.value;
+    const total = windowTotal.value;
+    const start = Math.max(0, Math.floor(st / VIRT_ROW));
+    const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
+    const end = Math.min(total, start + count);
+    const padTop = start * VIRT_ROW;
+    const padBottom = Math.max(0, (total - end) * VIRT_ROW);
+    return { padTop, padBottom, total };
+  });
+
+  // eslint-disable-next-line qwik/no-use-visible-task -- DuckDB Worker はブラウザのみ
+  useVisibleTask$(async ({ track, cleanup }) => {
+    track(() => loaderData.value);
+    const ac = new AbortController();
+    cleanup(() => ac.abort());
     loadError.value = "";
     try {
-      items.value = await apiItemsList({ limit: APP_ITEMS_LIMIT });
-      try {
-        stats.value = await apiItemsStats();
-      } catch {
-        stats.value = null;
+      const ns = namespaceFromAccessToken(getAccessToken());
+      const arrowPref = startArrowIpcPrefetch(ac.signal);
+      await itemsDbInit({ namespace: ns });
+      if (ac.signal.aborted) return;
+      dbReady.value = true;
+      const n = await itemsDbRowCount();
+      if (ac.signal.aborted) return;
+      if (n === 0) {
+        await applyFullResyncFromPrefetch(arrowPref, ac.signal);
       }
+      if (ac.signal.aborted) return;
+      const st = virtScrollTop.value;
+      const start = Math.max(0, Math.floor(st / VIRT_ROW));
+      const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
+      const r = await itemsDbQueryWindow({
+        filter: filter.value,
+        sortKey: sortKey.value,
+        sortAsc: sortAsc.value,
+        offset: start,
+        limit: count,
+      });
+      if (ac.signal.aborted) return;
+      windowRows.value = r.rows;
+      windowTotal.value = r.total;
+      stats.value = await itemsDbQueryStats();
     } catch (e) {
-      loadError.value = e instanceof Error ? e.message : String(e);
+      if (!ac.signal.aborted) {
+        loadError.value = e instanceof Error ? e.message : String(e);
+      }
     }
   });
 
-  // routeLoader$ の結果をシグナルへ（SSR・クライアントナビ共通）。ok なら二重フェッチを避ける。
-  useTask$(({ track }) => {
-    track(() => loaderData.value);
-    const v = loaderData.value;
-    if (v && "ok" in v && v.ok) {
-      items.value = v.items;
-      stats.value = v.stats;
-    }
+  // eslint-disable-next-line qwik/no-use-visible-task
+  useVisibleTask$(({ track, cleanup }) => {
+    track(() => filter.value);
+    track(() => sortKey.value);
+    track(() => sortAsc.value);
+    track(() => virtScrollTop.value);
+    track(() => dbReady.value);
+    if (!dbReady.value) return;
+    const ac = new AbortController();
+    cleanup(() => ac.abort());
+    const tid = window.setTimeout(async () => {
+      try {
+        if (ac.signal.aborted) return;
+        const st = virtScrollTop.value;
+        const start = Math.max(0, Math.floor(st / VIRT_ROW));
+        const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
+        const r = await itemsDbQueryWindow({
+          filter: filter.value,
+          sortKey: sortKey.value,
+          sortAsc: sortAsc.value,
+          offset: start,
+          limit: count,
+        });
+        if (ac.signal.aborted) return;
+        windowRows.value = r.rows;
+        windowTotal.value = r.total;
+      } catch (e) {
+        if (!ac.signal.aborted) {
+          loadError.value = e instanceof Error ? e.message : String(e);
+        }
+      }
+    }, 48);
+    cleanup(() => {
+      window.clearTimeout(tid);
+      ac.abort();
+    });
   });
 
-  // Loader が 401（Cookie なし等）のときのみ Bearer で再取得
-  // eslint-disable-next-line qwik/no-use-visible-task -- localStorage の JWT はブラウザのみ
-  useVisibleTask$(async () => {
-    const v = loaderData.value;
-    if (v && "ok" in v && v.ok) return;
-    await reload();
-  });
-
-  /**
-   * フォーカス復帰: (1) `updated_after` で追加・更新をマージ (2) `id-set` でサーバに無い id を削除（Q2）。
-   * 優先: 差分の方が先。id 集合は物理削除後の真実とみなす。
-   */
   useOnWindow(
     "focus",
     $(async () => {
-      if (items.value.length === 0) return;
-
-      let changed = false;
-      let best = -1;
-      let bestS: string | null = null;
-      for (const r of items.value) {
-        if (!r.updated_at) continue;
-        const t = Date.parse(r.updated_at);
-        if (Number.isFinite(t) && t > best) {
-          best = t;
-          bestS = r.updated_at;
-        }
-      }
-      if (bestS) {
-        try {
-          const delta = await apiItemsUpdatedAfter(bestS);
-          if (delta.length > 0) {
-            const m = new Map(items.value.map((r) => [r.id, { ...r }]));
-            for (const d of delta) {
-              m.set(d.id, { ...d });
-            }
-            items.value = Array.from(m.values());
-            changed = true;
-          }
-        } catch {
-          /* 差分失敗は無視 */
-        }
-      }
-
+      if (!dbReady.value) return;
+      const total = windowTotal.value;
+      if (total === 0 && (await itemsDbRowCount()) === 0) return;
       try {
-        const serverIds = await apiItemsIdSet();
-        const alive = new Set(serverIds);
-        const next = items.value.filter((r) => alive.has(r.id));
-        if (next.length !== items.value.length) {
-          items.value = next;
-          changed = true;
-        }
-        if (changed) {
-          try {
-            stats.value = await apiItemsStats();
-          } catch {
-            stats.value = null;
+        const maxU = await itemsDbGetMaxUpdatedAt();
+        const nRows = await itemsDbRowCount();
+        // max_updated_at が空だと falsy で差分同期が丸ごとスキップされ、サーバ更新がローカルに反映されない
+        const after =
+          maxU.trim() !== ""
+            ? maxU
+            : nRows > 0
+              ? "1970-01-01T00:00:00Z"
+              : "";
+        if (after) {
+          const delta = await apiItemsUpdatedAfter(after);
+          if (delta.length > 0) {
+            await itemsDbApplyDelta({ upserts: delta });
           }
         }
+        const serverIds = await apiItemsIdSet();
+        await itemsDbReconcileIds({ ids: serverIds });
+        const st = virtScrollTop.value;
+        const start = Math.max(0, Math.floor(st / VIRT_ROW));
+        const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
+        const r = await itemsDbQueryWindow({
+          filter: filter.value,
+          sortKey: sortKey.value,
+          sortAsc: sortAsc.value,
+          offset: start,
+          limit: count,
+        });
+        windowRows.value = r.rows;
+        windowTotal.value = r.total;
+        stats.value = await itemsDbQueryStats();
       } catch {
-        /* id-set は無視 */
+        /* 同期失敗は無視 */
       }
     }),
   );
 
-  const filtered = useComputed$(() => {
-    const q = filter.value.trim().toLowerCase();
-    let rows = items.value.filter(
-      (i) => !q || i.title.toLowerCase().includes(q),
-    );
-    const k = sortKey.value;
-    const asc = sortAsc.value ? 1 : -1;
-    rows = [...rows].sort((a, b) => {
-      const va =
-        k === "title"
-          ? a.title
-          : k === "updated_at"
-            ? a.updated_at ?? ""
-            : a.id;
-      const vb =
-        k === "title"
-          ? b.title
-          : k === "updated_at"
-            ? b.updated_at ?? ""
-            : b.id;
-      return va < vb ? -asc : va > vb ? asc : 0;
-    });
-    return rows;
-  });
-
-  const virtWindow = useComputed$(() => {
-    const rows = filtered.value;
-    const st = virtScrollTop.value;
-    const start = Math.max(0, Math.floor(st / VIRT_ROW));
-    const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
-    const end = Math.min(rows.length, start + count);
-    const slice = rows.slice(start, end);
-    const padTop = start * VIRT_ROW;
-    const padBottom = Math.max(0, (rows.length - end) * VIRT_ROW);
-    return { slice, padTop, padBottom, total: rows.length };
+  const fullResync = $(async () => {
+    loadError.value = "";
+    busy.value = true;
+    try {
+      const ac = new AbortController();
+      await applyFullResyncFromPrefetch(
+        startArrowIpcPrefetch(ac.signal),
+        ac.signal,
+      );
+      const st = virtScrollTop.value;
+      const start = Math.max(0, Math.floor(st / VIRT_ROW));
+      const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
+      const r = await itemsDbQueryWindow({
+        filter: filter.value,
+        sortKey: sortKey.value,
+        sortAsc: sortAsc.value,
+        offset: start,
+        limit: count,
+      });
+      windowRows.value = r.rows;
+      windowTotal.value = r.total;
+      stats.value = await itemsDbQueryStats();
+    } catch (e) {
+      loadError.value = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy.value = false;
+    }
   });
 
   const openCreate = $(() => {
@@ -271,45 +231,62 @@ export default component$(() => {
     modalOpen.value = true;
   });
 
-  const clickEdit = $((ev: Event) => {
-    const id = (ev.currentTarget as HTMLElement).dataset.itemId;
-    if (!id) return;
-    const row = items.value.find((i) => i.id === id);
-    if (!row) return;
-    actionError.value = "";
-    editId.value = row.id;
-    draftTitle.value = row.title;
-    modal.value = "edit";
-    modalOpen.value = true;
-  });
-
-  const clickDelete = $((ev: Event) => {
-    const id = (ev.currentTarget as HTMLElement).dataset.itemId;
-    if (!id) return;
-    const row = items.value.find((i) => i.id === id);
-    if (!row) return;
-    actionError.value = "";
-    editId.value = row.id;
-    draftTitle.value = row.title;
-    modal.value = "delete";
-    modalOpen.value = true;
-  });
-
+  /** Esc / バックドロップ / キャンセル共通。bind:show と dialog.open をずらさないよう modalOpen を必ず下げる */
   const closeModal = $(() => {
     modal.value = "none";
     editId.value = null;
     modalOpen.value = false;
   });
 
+  const openEditRow = $((id: string, title: string) => {
+    actionError.value = "";
+    editId.value = id;
+    draftTitle.value = title;
+    modal.value = "edit";
+    modalOpen.value = true;
+  });
+
+  const openDeleteRow = $((id: string, title: string) => {
+    actionError.value = "";
+    editId.value = id;
+    draftTitle.value = title;
+    modal.value = "delete";
+    modalOpen.value = true;
+  });
+
+  const refreshAfterMutation = $(async () => {
+    const st = virtScrollTop.value;
+    const start = Math.max(0, Math.floor(st / VIRT_ROW));
+    const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
+    const r = await itemsDbQueryWindow({
+      filter: filter.value,
+      sortKey: sortKey.value,
+      sortAsc: sortAsc.value,
+      offset: start,
+      limit: count,
+    });
+    windowRows.value = r.rows;
+    windowTotal.value = r.total;
+    stats.value = await itemsDbQueryStats();
+  });
+
   const submitCreate = $(async () => {
     actionError.value = "";
     busy.value = true;
     try {
-      await apiItemCreate(draftTitle.value.trim());
+      const row = await apiItemCreate(draftTitle.value.trim());
+      await itemsDbApplyMutation({
+        kind: "upsert",
+        row: {
+          id: row.id,
+          title: row.title,
+          updated_at: row.updated_at ?? null,
+        },
+      });
       modal.value = "none";
       editId.value = null;
       modalOpen.value = false;
-      await reload();
+      await refreshAfterMutation();
     } catch (e) {
       actionError.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -323,11 +300,19 @@ export default component$(() => {
     actionError.value = "";
     busy.value = true;
     try {
-      await apiItemUpdate(id, draftTitle.value.trim());
+      const row = await apiItemUpdate(id, draftTitle.value.trim());
+      await itemsDbApplyMutation({
+        kind: "upsert",
+        row: {
+          id: row.id,
+          title: row.title,
+          updated_at: row.updated_at ?? null,
+        },
+      });
       modal.value = "none";
       editId.value = null;
       modalOpen.value = false;
-      await reload();
+      await refreshAfterMutation();
     } catch (e) {
       actionError.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -342,10 +327,11 @@ export default component$(() => {
     busy.value = true;
     try {
       await apiItemDelete(id);
+      await itemsDbApplyMutation({ kind: "delete", id });
       modal.value = "none";
       editId.value = null;
       modalOpen.value = false;
-      await reload();
+      await refreshAfterMutation();
     } catch (e) {
       actionError.value = e instanceof Error ? e.message : String(e);
     } finally {
@@ -353,46 +339,14 @@ export default component$(() => {
     }
   });
 
-  const fetchArrow = $(async () => {
-    arrowPreview.value = null;
-    arrowIpcRaw.value = null;
-    duckdbResult.value = null;
-    duckdbHint.value = "";
-    arrowHint.value = "取得中…";
-    try {
-      const buf = await apiItemsArrowBuffer();
-      const { preview, ipcStream } = await decodeArrowZstdFull(buf);
-      arrowPreview.value = preview;
-      arrowIpcRaw.value = ipcStream;
-      void tryWriteArrowIpcToOpfs(ipcStream);
-      arrowHint.value = `Arrow IPC + Zstd: 圧縮 ${buf.byteLength} bytes → 行数 ${preview.rowCount}（先頭 ${preview.previewLimit} 行を表示）`;
-    } catch (e) {
-      arrowHint.value =
-        e instanceof Error ? e.message : String(e);
-    }
-  });
-
-  const runDuckdbSmoke = $(async () => {
-    const ipc = arrowIpcRaw.value;
-    if (!ipc) return;
-    duckdbResult.value = null;
-    duckdbHint.value = "DuckDB-WASM 初期化・照会中…";
-    try {
-      const r = await queryArrowIpcSmoke(ipc);
-      duckdbResult.value = r;
-      duckdbHint.value = `DuckDB: ${r.version}`;
-    } catch (e) {
-      duckdbHint.value = e instanceof Error ? e.message : String(e);
-    }
-  });
-
   return (
     <div>
       <h1 class="mt-0 text-xl font-semibold tracking-tight">アイテム</h1>
       <p class="mb-4 text-sm text-muted-foreground">
-        フィルタ・ソートはクライアント側。データは{" "}
-        <code>POST /api/graphql</code>（<code>itemsSlice</code> /{" "}
-        <code>itemStats</code> / <code>itemsUpdatedAfter</code> など）。
+        一覧・集計の SSOT はブラウザ内 <strong>DuckDB-WASM</strong>
+        （OPFS 永続化を試行、不可時はインメモリ）。初回は Arrow 取得を WASM
+        初期化と並列に進め、準備完了後に取り込みます。「サーバから再同期」で{" "}
+        <code>itemsArrowBinary</code> / GraphQL 一覧に追随します。
       </p>
 
       {loadError.value ? (
@@ -467,97 +421,11 @@ export default component$(() => {
           <Button type="button" onClick$={openCreate}>
             追加
           </Button>
-          <Button type="button" look="outline" onClick$={reload}>
-            再読込
-          </Button>
-          <Button type="button" look="outline" onClick$={fetchArrow}>
-            Arrow 取得
-          </Button>
-          <Button
-            type="button"
-            look="outline"
-            disabled={!arrowIpcRaw.value}
-            onClick$={runDuckdbSmoke}
-          >
-            DuckDB で照会
+          <Button type="button" look="outline" onClick$={fullResync}>
+            サーバから再同期
           </Button>
         </div>
       </div>
-
-      {arrowHint.value ? (
-        <p class="hint mb-2">{arrowHint.value}</p>
-      ) : null}
-
-      {arrowPreview.value ? (
-        <div class="table-wrap mb-4">
-          <p class="mb-2 text-sm text-muted-foreground">
-            Arrow プレビュー（apache-arrow + fzstd）
-          </p>
-          <table class="data">
-            <thead>
-              <tr>
-                {arrowPreview.value.columns.map((c) => (
-                  <th key={c}>{c}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {arrowPreview.value.rows.map((r, idx) => (
-                <tr key={idx}>
-                  {arrowPreview.value!.columns.map((c) => (
-                    <td key={c} class="text-xs text-muted-foreground">
-                      {r[c] ?? ""}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
-
-      {duckdbHint.value ? (
-        <p class="hint mb-2">{duckdbHint.value}</p>
-      ) : null}
-
-      {duckdbResult.value ? (
-        <div class="table-wrap mb-4">
-          <p class="mb-2 text-sm text-muted-foreground">
-            DuckDB-WASM（<code>{duckdbResult.value.countSql}</code> /{" "}
-            <code>{duckdbResult.value.sampleSql}</code>）
-          </p>
-          <p class="mb-1 text-xs text-muted-foreground">
-            件数:{" "}
-            <strong>
-              {duckdbResult.value.countRows[0]?.cnt ?? "—"}
-            </strong>
-          </p>
-          <table class="data">
-            <thead>
-              <tr>
-                {duckdbResult.value.sampleRows[0]
-                  ? Object.keys(duckdbResult.value.sampleRows[0]).map(
-                      (k) => (
-                        <th key={k}>{k}</th>
-                      ),
-                    )
-                  : null}
-              </tr>
-            </thead>
-            <tbody>
-              {duckdbResult.value.sampleRows.map((r, idx) => (
-                <tr key={idx}>
-                  {Object.entries(r).map(([k, v]) => (
-                    <td key={k} class="text-xs text-muted-foreground">
-                      {v}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
 
       <div
         class="virt-scroller table-wrap"
@@ -580,7 +448,7 @@ export default component$(() => {
             </tr>
           </thead>
           <tbody>
-            {virtWindow.value.total === 0 ? (
+            {virtPad.value.total === 0 ? (
               <tr>
                 <td colSpan={4} class="text-muted-foreground">
                   行がありません
@@ -594,11 +462,11 @@ export default component$(() => {
                     style={{
                       padding: 0,
                       border: "none",
-                      height: `${virtWindow.value.padTop}px`,
+                      height: `${virtPad.value.padTop}px`,
                     }}
                   />
                 </tr>
-                {virtWindow.value.slice.map((row) => (
+                {windowRows.value.map((row) => (
                   <tr key={row.id} style={{ height: `${VIRT_ROW}px` }}>
                     <td>{row.title}</td>
                     <td>
@@ -608,25 +476,13 @@ export default component$(() => {
                       {row.updated_at ?? "—"}
                     </td>
                     <td class="whitespace-nowrap">
-                      <Button
-                        type="button"
-                        look="outline"
-                        size="sm"
-                        class="mr-1"
-                        data-item-id={row.id}
-                        onClick$={clickEdit}
-                      >
-                        編集
-                      </Button>
-                      <Button
-                        type="button"
-                        look="alert"
-                        size="sm"
-                        data-item-id={row.id}
-                        onClick$={clickDelete}
-                      >
-                        削除
-                      </Button>
+                      <ItemRowActions
+                        key={row.id}
+                        itemId={row.id}
+                        itemTitle={row.title}
+                        onEdit$={openEditRow}
+                        onDelete$={openDeleteRow}
+                      />
                     </td>
                   </tr>
                 ))}
@@ -636,7 +492,7 @@ export default component$(() => {
                     style={{
                       padding: 0,
                       border: "none",
-                      height: `${virtWindow.value.padBottom}px`,
+                      height: `${virtPad.value.padBottom}px`,
                     }}
                   />
                 </tr>
@@ -647,18 +503,11 @@ export default component$(() => {
       </div>
 
       <p class="mb-4 text-xs text-muted-foreground">
-        表示中フィルタ後 {filtered.value.length} 件 · 仮想スクロール（行高さ約 {VIRT_ROW}
-        px）。フォーカス復帰時: <code>itemsUpdatedAfter</code> で他タブの追加・更新をマージし、
-        <code>itemIds</code> で他タブの削除を同期。
+        表示件数（フィルタ後）{virtPad.value.total} 件 · 仮想スクロール。フォーカス復帰時に{" "}
+        <code>itemsUpdatedAfter</code> / <code>itemIds</code> で DuckDB を更新し集計を再計算。
       </p>
 
-      <Modal.Root
-        bind:show={modalOpen}
-        onClose$={$(() => {
-          modal.value = "none";
-          editId.value = null;
-        })}
-      >
+      <Modal.Root bind:show={modalOpen} onClose$={closeModal}>
         <Modal.Panel>
           {modal.value === "create" ? (
             <>

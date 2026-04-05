@@ -63,3 +63,10 @@ The production build will generate client and server modules by running both cli
 ```shell
 npm run build # or `yarn build`
 ```
+
+## Tests（lowspec フロント）
+
+- **単体**: `npm run test:unit`（Vitest、`tests/unit/`）。バックエンド不要。**[ENV-01]** の COOP/COEP は Qwik dev の HTML にヘッダが乗らないことがあるため、`vite.config.ts` の記述を静的検証するテストを含む。
+- **E2E**: **CRUD・[SRV-01] を含むフル E2E は lowspec バックエンド必須**（未起動・プロキシ不一致だと GraphQL が失敗する）。`frontend/.env` の **`BACKEND_URL` または `BACKEND_HOST`/`BACKEND_PORT`** を実際の `BIND_ADDR` と一致させる。初回のみ `npm run test:e2e:install`（Chromium 取得）。`npm run test:e2e` は `playwright.config` の `webServer` で **`npm run dev`** を立ち上げる（フロントのみ自動起動）。**5173 が既に使用中**のときはプロセスを止めるか `reuseExistingServer` を調整すること。不具合調査時はブラウザの Network で **`POST /api/graphql` のレスポンス本文**に `errors` が無いか確認すること（Vitest のみ緑でも E2E は未実行の可能性あり）。
+- **UI モード**: `npm run test:e2e:ui`
+- ログインは README 例どおり `dev@example.com` / `devpass`（本番シークレットをリポジトリに置かないこと）。

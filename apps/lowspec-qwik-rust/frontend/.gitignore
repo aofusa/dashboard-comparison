@@ -44,3 +44,9 @@ lerna-debug.log*
 
 .nx/cache
 .nx/workspace-data
+
+# Tests
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/

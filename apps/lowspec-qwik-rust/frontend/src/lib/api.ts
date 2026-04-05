@@ -208,8 +208,10 @@ export async function apiItemCreate(title: string): Promise<ItemRow> {
   return mapItem(data.createItem);
 }
 
-export async function apiItemUpdate(id: string, title: string): Promise<void> {
-  await graphqlJson<{ updateItem: { id: string } }>({
+export async function apiItemUpdate(id: string, title: string): Promise<ItemRow> {
+  const data = await graphqlJson<{
+    updateItem: { id: string; title: string; updatedAt?: string | null };
+  }>({
     query: `
       mutation UpdateItem($id: String!, $title: String!) {
         updateItem(id: $id, title: $title) { id title updatedAt }
@@ -217,10 +219,11 @@ export async function apiItemUpdate(id: string, title: string): Promise<void> {
     variables: { id, title },
     operationName: "UpdateItem",
   });
+  return mapItem(data.updateItem);
 }
 
 export async function apiItemDelete(id: string): Promise<void> {
-  await graphqlJson<{ deleteItem: boolean }>({
+  const data = await graphqlJson<{ deleteItem: boolean }>({
     query: `
       mutation DeleteItem($id: String!) {
         deleteItem(id: $id)
@@ -228,6 +231,9 @@ export async function apiItemDelete(id: string): Promise<void> {
     variables: { id },
     operationName: "DeleteItem",
   });
+  if (!data.deleteItem) {
+    throw new Error("削除できませんでした（対象が見つかりません）");
+  }
 }
 
 /** Arrow IPC + Zstd 生バイナリ（`operationName: ItemsArrowBinary` + `Accept`）。 */
