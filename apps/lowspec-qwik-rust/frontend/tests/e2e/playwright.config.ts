@@ -4,6 +4,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = path.join(here, "../..");
+const authFile = path.join(here, ".auth", "dev.json");
+
+const sharedChrome = { ...devices["Desktop Chrome"] };
 
 export default defineConfig({
   testDir: here,
@@ -19,7 +22,25 @@ export default defineConfig({
     trace: "retain-on-failure",
     video: "off",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    { name: "setup", testMatch: /auth\.setup\.ts$/ },
+    {
+      name: "chromium-auth",
+      dependencies: ["setup"],
+      testMatch: /app\.spec\.ts$/,
+      grepInvert: /\[RT-02\]/,
+      use: {
+        ...sharedChrome,
+        storageState: authFile,
+      },
+    },
+    {
+      name: "chromium-unauth",
+      testMatch: /app\.spec\.ts$/,
+      grep: /\[RT-02\]/,
+      use: { ...sharedChrome },
+    },
+  ],
   webServer: {
     command: "npm run dev",
     url: "http://127.0.0.1:5173",

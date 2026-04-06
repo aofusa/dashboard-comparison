@@ -3,14 +3,13 @@ import { Button } from "~/components/ui";
 
 export type ItemRowActionsProps = {
   itemId: string;
-  itemTitle: string;
-  onEdit$: QRL<(id: string, title: string) => void>;
-  onDelete$: QRL<(id: string, title: string) => void>;
+  /** タイトルは $() 内で参照しない（再開時に陳腐化するため id のみ渡し、親が WASM から解決） */
+  onEdit$: QRL<(id: string) => void>;
+  onDelete$: QRL<(id: string) => void>;
 };
 
 /**
- * 一覧行の編集・削除。props の id/title と親から渡す QRL のみ参照し、
- * map 内インライン QRL（resume 不安定）を避ける。
+ * 一覧行の編集・削除。クリックは id のみ渡す（$() 内で props.itemTitle を閉じない）。
  */
 export const ItemRowActions = component$<ItemRowActionsProps>((props) => {
   return (
@@ -20,9 +19,7 @@ export const ItemRowActions = component$<ItemRowActionsProps>((props) => {
         look="outline"
         size="sm"
         class="mr-1"
-        onClick$={$(() =>
-          props.onEdit$(props.itemId, props.itemTitle),
-        )}
+        onClick$={$(() => props.onEdit$(props.itemId))}
       >
         編集
       </Button>
@@ -30,9 +27,7 @@ export const ItemRowActions = component$<ItemRowActionsProps>((props) => {
         type="button"
         look="alert"
         size="sm"
-        onClick$={$(() =>
-          props.onDelete$(props.itemId, props.itemTitle),
-        )}
+        onClick$={$(() => props.onDelete$(props.itemId))}
       >
         削除
       </Button>

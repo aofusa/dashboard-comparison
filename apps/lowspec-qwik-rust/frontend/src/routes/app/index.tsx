@@ -26,19 +26,26 @@ import {
   itemsDbApplyDelta,
   itemsDbApplyMutation,
   itemsDbGetMaxUpdatedAt,
+  itemsDbGetRowById,
   itemsDbInit,
   itemsDbQueryStats,
-  itemsDbQueryWindow,
   itemsDbReconcileIds,
   itemsDbRowCount,
   namespaceFromAccessToken,
 } from "~/lib/itemsDbClient";
 import { getAccessToken } from "~/lib/auth";
+import {
+  refreshDashboardQueryWindow,
+  type DashboardQueryWindowDeps,
+} from "~/lib/dashboardRefreshWindow";
+import {
+  scrollStartRow,
+  VIRT_ROW,
+  VIRT_VIEW,
+  VISIBLE_DATA_ROW_COUNT,
+} from "~/lib/dashboardVirtualWindow";
 
 type ItemModal = "none" | "create" | "edit" | "delete";
-
-const VIRT_ROW = 48;
-const VIRT_VIEW = 440;
 
 /** SSR では DuckDB を使わない。実データはクライアントで Worker 初期化後に DuckDB SSOT へ載せる。 */
 export const useAppDashboardLoader = routeLoader$(async () => {
@@ -54,8 +61,17 @@ export default component$(() => {
   const sortAsc = useSignal(true);
   const stats = useSignal<ItemsStats | null>(null);
   const virtScrollTop = useSignal(0);
-  /** DuckDB queryWindow の結果（仮想ウィンドウ分のみ） */
-  const windowRows = useSignal<ItemRow[]>([]);
+  /**
+   * P0: 直近の queryWindow リクエスト世代。古い RPC 応答で window を上書きしない。
+   */
+  const queryWindowGen = useSignal(0);
+  /** DuckDB queryWindow の生バッファ（オーバースキャン分を含む） */
+  const bufferRows = useSignal<ItemRow[]>([]);
+  const bufferOffset = useSignal(0);
+  /** bufferRows がカバーするグローバル行インデックス [start, end) */
+  const bufferRangeStart = useSignal(0);
+  const bufferRangeEnd = useSignal(0);
+  const bufferQueryKey = useSignal("");
   const windowTotal = useSignal(0);
   const dbReady = useSignal(false);
   const modal = useSignal<ItemModal>("none");
@@ -64,16 +80,58 @@ export default component$(() => {
   const draftTitle = useSignal("");
   const actionError = useSignal("");
 
+  /** padTop + slotCount*VIRT_ROW + padBottom === total*VIRT_ROW（仮想高さ不変） */
   const virtPad = useComputed$(() => {
     const st = virtScrollTop.value;
     const total = windowTotal.value;
-    const start = Math.max(0, Math.floor(st / VIRT_ROW));
-    const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
+    const start = scrollStartRow(st);
+    const count = VISIBLE_DATA_ROW_COUNT;
     const end = Math.min(total, start + count);
+    const slotCount = Math.max(0, end - start);
     const padTop = start * VIRT_ROW;
     const padBottom = Math.max(0, (total - end) * VIRT_ROW);
-    return { padTop, padBottom, total };
+    return { padTop, padBottom, total, start, end, slotCount };
   });
+
+  /**
+   * 論理スロット slotCount 本ぶん常に行を描画。未取得はプレースホルダー（高速スクロール空白軽減）。
+   */
+  const visibleRowSlots = useComputed$(() => {
+    const st = virtScrollTop.value;
+    const total = windowTotal.value;
+    const start = scrollStartRow(st);
+    const end = Math.min(total, start + VISIBLE_DATA_ROW_COUNT);
+    const slotCount = Math.max(0, end - start);
+    const off = bufferOffset.value;
+    const rows = bufferRows.value;
+    const i0 = start - off;
+    const slots: { key: string; row: ItemRow | null }[] = [];
+    for (let i = 0; i < slotCount; i++) {
+      const idx = i0 + i;
+      const row =
+        idx >= 0 && idx < rows.length ? (rows[idx] ?? null) : null;
+      slots.push({
+        key: row?.id ?? `virt-slot-${start + i}`,
+        row,
+      });
+    }
+    return slots;
+  });
+
+  /** Qwik Optimizer 対策: async ロジックは component$ 外の refreshDashboardQueryWindow へ */
+  const queryWindowDeps: DashboardQueryWindowDeps = {
+    virtScrollTop,
+    filter,
+    sortKey,
+    sortAsc,
+    queryWindowGen,
+    bufferRows,
+    bufferOffset,
+    bufferRangeStart,
+    bufferRangeEnd,
+    bufferQueryKey,
+    windowTotal,
+  };
 
   // eslint-disable-next-line qwik/no-use-visible-task -- DuckDB Worker はブラウザのみ
   useVisibleTask$(async ({ track, cleanup }) => {
@@ -93,19 +151,8 @@ export default component$(() => {
         await applyFullResyncFromPrefetch(arrowPref, ac.signal);
       }
       if (ac.signal.aborted) return;
-      const st = virtScrollTop.value;
-      const start = Math.max(0, Math.floor(st / VIRT_ROW));
-      const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
-      const r = await itemsDbQueryWindow({
-        filter: filter.value,
-        sortKey: sortKey.value,
-        sortAsc: sortAsc.value,
-        offset: start,
-        limit: count,
-      });
+      await refreshDashboardQueryWindow(queryWindowDeps, true, ac.signal);
       if (ac.signal.aborted) return;
-      windowRows.value = r.rows;
-      windowTotal.value = r.total;
       stats.value = await itemsDbQueryStats();
     } catch (e) {
       if (!ac.signal.aborted) {
@@ -127,19 +174,7 @@ export default component$(() => {
     const tid = window.setTimeout(async () => {
       try {
         if (ac.signal.aborted) return;
-        const st = virtScrollTop.value;
-        const start = Math.max(0, Math.floor(st / VIRT_ROW));
-        const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
-        const r = await itemsDbQueryWindow({
-          filter: filter.value,
-          sortKey: sortKey.value,
-          sortAsc: sortAsc.value,
-          offset: start,
-          limit: count,
-        });
-        if (ac.signal.aborted) return;
-        windowRows.value = r.rows;
-        windowTotal.value = r.total;
+        await refreshDashboardQueryWindow(queryWindowDeps, false, ac.signal);
       } catch (e) {
         if (!ac.signal.aborted) {
           loadError.value = e instanceof Error ? e.message : String(e);
@@ -176,18 +211,7 @@ export default component$(() => {
         }
         const serverIds = await apiItemsIdSet();
         await itemsDbReconcileIds({ ids: serverIds });
-        const st = virtScrollTop.value;
-        const start = Math.max(0, Math.floor(st / VIRT_ROW));
-        const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
-        const r = await itemsDbQueryWindow({
-          filter: filter.value,
-          sortKey: sortKey.value,
-          sortAsc: sortAsc.value,
-          offset: start,
-          limit: count,
-        });
-        windowRows.value = r.rows;
-        windowTotal.value = r.total;
+        await refreshDashboardQueryWindow(queryWindowDeps, true);
         stats.value = await itemsDbQueryStats();
       } catch {
         /* 同期失敗は無視 */
@@ -204,18 +228,7 @@ export default component$(() => {
         startArrowIpcPrefetch(ac.signal),
         ac.signal,
       );
-      const st = virtScrollTop.value;
-      const start = Math.max(0, Math.floor(st / VIRT_ROW));
-      const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
-      const r = await itemsDbQueryWindow({
-        filter: filter.value,
-        sortKey: sortKey.value,
-        sortAsc: sortAsc.value,
-        offset: start,
-        limit: count,
-      });
-      windowRows.value = r.rows;
-      windowTotal.value = r.total;
+      await refreshDashboardQueryWindow(queryWindowDeps, true);
       stats.value = await itemsDbQueryStats();
     } catch (e) {
       loadError.value = e instanceof Error ? e.message : String(e);
@@ -238,35 +251,38 @@ export default component$(() => {
     modalOpen.value = false;
   });
 
-  const openEditRow = $((id: string, title: string) => {
+  const openEditRow = $(async (id: string) => {
     actionError.value = "";
     editId.value = id;
-    draftTitle.value = title;
+    const fromBuffer = bufferRows.value.find((r) => r.id === id);
+    const row =
+      fromBuffer ?? (await itemsDbGetRowById(id).catch(() => null));
+    if (!row) {
+      actionError.value = "行が見つかりません";
+      return;
+    }
+    draftTitle.value = row.title;
     modal.value = "edit";
     modalOpen.value = true;
   });
 
-  const openDeleteRow = $((id: string, title: string) => {
+  const openDeleteRow = $(async (id: string) => {
     actionError.value = "";
     editId.value = id;
-    draftTitle.value = title;
+    const fromBuffer = bufferRows.value.find((r) => r.id === id);
+    const row =
+      fromBuffer ?? (await itemsDbGetRowById(id).catch(() => null));
+    if (!row) {
+      actionError.value = "行が見つかりません";
+      return;
+    }
+    draftTitle.value = row.title;
     modal.value = "delete";
     modalOpen.value = true;
   });
 
   const refreshAfterMutation = $(async () => {
-    const st = virtScrollTop.value;
-    const start = Math.max(0, Math.floor(st / VIRT_ROW));
-    const count = Math.ceil(VIRT_VIEW / VIRT_ROW) + 4;
-    const r = await itemsDbQueryWindow({
-      filter: filter.value,
-      sortKey: sortKey.value,
-      sortAsc: sortAsc.value,
-      offset: start,
-      limit: count,
-    });
-    windowRows.value = r.rows;
-    windowTotal.value = r.total;
+    await refreshDashboardQueryWindow(queryWindowDeps, true);
     stats.value = await itemsDbQueryStats();
   });
 
@@ -466,23 +482,36 @@ export default component$(() => {
                     }}
                   />
                 </tr>
-                {windowRows.value.map((row) => (
-                  <tr key={row.id} style={{ height: `${VIRT_ROW}px` }}>
-                    <td>{row.title}</td>
+                {visibleRowSlots.value.map((slot) => (
+                  <tr
+                    key={slot.key}
+                    style={{ height: `${VIRT_ROW}px` }}
+                    class={
+                      slot.row
+                        ? undefined
+                        : "bg-muted/20 text-muted-foreground/40"
+                    }
+                  >
+                    <td>{slot.row?.title ?? "\u00a0"}</td>
                     <td>
-                      <code style={{ fontSize: "0.75rem" }}>{row.id}</code>
+                      {slot.row ? (
+                        <code style={{ fontSize: "0.75rem" }}>{slot.row.id}</code>
+                      ) : (
+                        "\u00a0"
+                      )}
                     </td>
                     <td class="text-muted-foreground">
-                      {row.updated_at ?? "—"}
+                      {slot.row?.updated_at ?? (slot.row ? "—" : "\u00a0")}
                     </td>
                     <td class="whitespace-nowrap">
-                      <ItemRowActions
-                        key={row.id}
-                        itemId={row.id}
-                        itemTitle={row.title}
-                        onEdit$={openEditRow}
-                        onDelete$={openDeleteRow}
-                      />
+                      {slot.row ? (
+                        <ItemRowActions
+                          key={slot.row.id}
+                          itemId={slot.row.id}
+                          onEdit$={openEditRow}
+                          onDelete$={openDeleteRow}
+                        />
+                      ) : null}
                     </td>
                   </tr>
                 ))}

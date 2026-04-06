@@ -400,6 +400,26 @@ async function handleRowCount(): Promise<number> {
   return Number(col?.get(0) ?? 0);
 }
 
+async function handleGetRowById(id: string): Promise<ItemRow | null> {
+  const c = await ensureConn();
+  const esc = id.replace(/'/g, "''");
+  const t = await c.query(
+    `SELECT id, title, updated_at FROM app_items WHERE id = '${esc}' LIMIT 1`,
+  );
+  if (t.numRows === 0) return null;
+  const idCol = t.getChild("id");
+  const titleCol = t.getChild("title");
+  const updCol = t.getChild("updated_at");
+  return {
+    id: String(idCol?.get(0) ?? ""),
+    title: String(titleCol?.get(0) ?? ""),
+    updated_at:
+      updCol?.get(0) == null || updCol?.get(0) === ""
+        ? null
+        : String(updCol.get(0)),
+  };
+}
+
 /** 旧スモーク: 一時テーブルで Arrow を検証（デバッグ用） */
 async function handleSmokeQuery(ipc: Uint8Array): Promise<{
   version: string;
@@ -436,6 +456,7 @@ type Req =
   | { id: number; type: "queryStats" }
   | { id: number; type: "getMaxUpdatedAt" }
   | { id: number; type: "rowCount" }
+  | { id: number; type: "getRowById"; payload: { id: string } }
   | { id: number; type: "truncateItems" }
   | { id: number; type: "smokeQuery"; ipc: ArrayBuffer };
 
@@ -482,6 +503,9 @@ async function drain(): Promise<void> {
             break;
           case "rowCount":
             result = await handleRowCount();
+            break;
+          case "getRowById":
+            result = await handleGetRowById(msg.payload.id);
             break;
           case "truncateItems":
             await handleTruncateItems();

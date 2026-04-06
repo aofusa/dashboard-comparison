@@ -46,3 +46,7 @@ export type ApplyMutationPayload =
 export type ReconcileIdsPayload = {
   ids: string[];
 };
+
+export type GetRowByIdPayload = {
+  id: string;
+};

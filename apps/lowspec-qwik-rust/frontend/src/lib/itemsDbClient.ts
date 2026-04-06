@@ -2,6 +2,7 @@ import type {
   ApplyDeltaPayload,
   ApplyMutationPayload,
   InitPayload,
+  ItemRow,
   ItemsStats,
   QueryWindowPayload,
   QueryWindowResult,
@@ -99,6 +100,11 @@ export async function itemsDbGetMaxUpdatedAt(): Promise<string> {
 
 export async function itemsDbRowCount(): Promise<number> {
   return rpc({ type: "rowCount" });
+}
+
+/** 仮想ウィンドウ外の行でも SSOT からタイトルを取得する（モーダル用） */
+export async function itemsDbGetRowById(id: string): Promise<ItemRow | null> {
+  return rpc({ type: "getRowById", payload: { id } });
 }
 
 export async function itemsDbTruncate(): Promise<void> {

@@ -79,6 +79,8 @@ cd frontend && npm install && npm start
 # 別ターミナルで backend を起動してから /login/ → /app/
 ```
 
+**自動テスト（フロント）**: `frontend/README.md` の「Tests（lowspec フロント）」を参照。`cd frontend && npm run test:unit`（バックエンド不要）、`npm run test:e2e`（**バックエンド起動後**・初回は `npm run test:e2e:install` で Chromium 取得）。
+
 ## ベンチマークとの整合
 
 `benchmarks/run-scenarios.sh`（`BENCH_API_FLAVOR=rust`）は **REST ログイン・GET items** を前提とするため、**現行バックエンドとは一部非互換**です。手動確認は **GraphQL** の `curl` を使ってください（モノレポ直下 `README.md` の「ベンチマークと実装の対応」）。**REST でのベンチ・curl 比較**は **lean-next-hono** が担当します。計画書と現状表の差分は `specs/artifacts/dashboard-template-plan-vs-implement-gap_20260406.md`。
