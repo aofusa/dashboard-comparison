@@ -44,3 +44,11 @@ lerna-debug.log*
 
 .nx/cache
 .nx/workspace-data
+
+# Tests
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+# Playwright E2E: global setup が生成する認証状態（リポジトリに含めない）
+/tests/e2e/.auth/

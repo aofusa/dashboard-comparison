@@ -122,85 +122,12 @@ function mapItem(g: {
   };
 }
 
-const APP_DASHBOARD_GQL = `
-  query AppDashboardLoader($limit: Int!) {
-    slice: itemsSlice(limit: $limit, offset: 0) {
-      items { id title updatedAt }
-    }
-    stats: itemStats {
-      total
-      byInitial { letter count }
-    }
-  }
-`;
-
-/** `routeLoader$` 用: Cookie 付きで GraphQL。JWT のみの初回は 401 → クライアントで再取得。 */
-export async function fetchDashboardLoaderData(ev: {
+/** DuckDB SSOT のため SSR では一覧を取らない。互換のため残す。 */
+export async function fetchDashboardLoaderData(_ev: {
   url: { origin: string };
   request: { headers: Headers };
-}): Promise<
-  | { ok: true; items: ItemRow[]; stats: ItemsStats }
-  | { ok: false; needClient: true }
-> {
-  const LOADER_LIMIT = 65535;
-  const origin = ev.url.origin;
-  const cookie = ev.request.headers.get("cookie") ?? "";
-  const headers: HeadersInit = {
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    ...(cookie ? { Cookie: cookie } : {}),
-  };
-  const res = await fetch(new URL("/api/graphql", origin), {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      query: APP_DASHBOARD_GQL,
-      variables: { limit: LOADER_LIMIT },
-      operationName: "AppDashboardLoader",
-    }),
-  });
-  if (res.status === 401) {
-    return { ok: false, needClient: true };
-  }
-  type GqlErr = { message: string; extensions?: { code?: number } };
-  let j: {
-    data?: {
-      slice: {
-        items: { id: string; title: string; updatedAt?: string | null }[];
-      };
-      stats: {
-        total: number;
-        byInitial: { letter: string; count: number }[];
-      };
-    };
-    errors?: GqlErr[];
-  };
-  try {
-    j = (await res.json()) as typeof j;
-  } catch {
-    return { ok: false, needClient: true };
-  }
-  if (j.errors?.length) {
-    const unauth = j.errors.some((e) => e.extensions?.code === 401);
-    if (unauth) return { ok: false, needClient: true };
-    return { ok: false, needClient: true };
-  }
-  if (!res.ok || !j.data) {
-    return { ok: false, needClient: true };
-  }
-  const items: ItemRow[] = j.data.slice.items.map((r) => ({
-    id: r.id,
-    title: r.title,
-    updated_at: r.updatedAt ?? null,
-  }));
-  const stats: ItemsStats = {
-    total: j.data.stats.total,
-    by_initial: j.data.stats.byInitial.map((b) => ({
-      letter: b.letter,
-      count: b.count,
-    })),
-  };
-  return { ok: true, items, stats };
+}): Promise<{ ok: true }> {
+  return { ok: true };
 }
 
 export async function apiItemsList(opts?: {
@@ -289,8 +216,10 @@ export async function apiItemCreate(title: string): Promise<ItemRow> {
   return mapItem(data.createItem);
 }
 
-export async function apiItemUpdate(id: string, title: string): Promise<void> {
-  await graphqlJson<{ updateItem: { id: string } }>({
+export async function apiItemUpdate(id: string, title: string): Promise<ItemRow> {
+  const data = await graphqlJson<{
+    updateItem: { id: string; title: string; updatedAt?: string | null };
+  }>({
     query: `
       mutation UpdateItem($id: String!, $title: String!) {
         updateItem(id: $id, title: $title) { id title updatedAt }
@@ -298,10 +227,11 @@ export async function apiItemUpdate(id: string, title: string): Promise<void> {
     variables: { id, title },
     operationName: "UpdateItem",
   });
+  return mapItem(data.updateItem);
 }
 
 export async function apiItemDelete(id: string): Promise<void> {
-  await graphqlJson<{ deleteItem: boolean }>({
+  const data = await graphqlJson<{ deleteItem: boolean }>({
     query: `
       mutation DeleteItem($id: String!) {
         deleteItem(id: $id)
@@ -309,6 +239,9 @@ export async function apiItemDelete(id: string): Promise<void> {
     variables: { id },
     operationName: "DeleteItem",
   });
+  if (!data.deleteItem) {
+    throw new Error("削除できませんでした（対象が見つかりません）");
+  }
 }
 
 /** Arrow IPC + Zstd 生バイナリ（`operationName: ItemsArrowBinary` + `Accept`）。 */
