@@ -26,6 +26,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use aws_config::Region;
 use aws_credential_types::Credentials;
+use aws_sdk_dynamodb::config::BehaviorVersion;
 use aws_sdk_dynamodb::config::Builder as DdbConfigBuilder;
 use content_repository::{ContentRepository, DynamoContentRepository};
 use content_write_through::WriteThroughContentRepository;
@@ -81,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         "perf-backend",
     );
     let mut b = DdbConfigBuilder::new()
+        .behavior_version(BehaviorVersion::latest())
         .region(Region::new(cfg.aws_region.clone()))
         .credentials_provider(creds);
     if let Some(ref ep) = cfg.dynamodb_endpoint {
