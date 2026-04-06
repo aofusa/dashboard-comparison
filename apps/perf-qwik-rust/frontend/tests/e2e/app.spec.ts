@@ -92,7 +92,7 @@ test.describe("authenticated dashboard", () => {
     await waitForAppTableReady(page);
 
     const token = await page.evaluate(() =>
-      localStorage.getItem("lowspec_access_token"),
+      localStorage.getItem("perf_access_token"),
     );
     expect(token).toBeTruthy();
     const origin = new URL(page.url()).origin;
