@@ -128,8 +128,9 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/api/auth/logout" \
 
 ## 性能テスト・ベンチ向けメモ
 
-- **BASE_URL 例**: `http://127.0.0.1:3000`（`npm run dev` / `npm start` の listen に合わせる）。
-- **GraphQL・Arrow IPC・DuckDB 関連シナリオは本アプリの対象外**。REST（`/api/health`・認証・items・stats・id-set）のみ比較対象にすること。
+- **BASE_URL 例**: `http://localhost:3000`（`AUTH_URL` / `NEXTAUTH_URL` とホストを揃える。`npm run dev` / `npm start` の listen に合わせる）。
+- モノレポの **`benchmarks/run-lean-next-hono.sh`** は **`BENCH_API_FLAVOR=lean-rest`**（REST login・items・`GET /api/version`）。**`db:seed` 済み**が前提。対応表は **`benchmarks/scenarios/API_MATRIX.md`**、手順はルート **`README.md` の「ベンチマーク（Runbook）」**。
+- **GraphQL・Arrow IPC・DuckDB 関連シナリオは本アプリの対象外**。REST（`/api/health`・認証・items・stats・id-set）が比較の主対象。
 
 ## 仕様チェックリスト（進捗）
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""benchmarks/results/*.json から API ベンチ用 Markdown 表を出力する。"""
+"""benchmarks/results/*.json から API ベンチ用 Markdown 表を出力する。
+
+JSON の `scenarios` キーは benchmarks/run-scenarios.sh の python3 埋め込みと対応。
+変更する場合は run-scenarios.sh 側の dict キーと必ず揃えること。
+"""
 from __future__ import annotations
 
 import json
@@ -8,19 +12,24 @@ import sys
 from pathlib import Path
 
 IMPL_ORDER = ("perf-qwik-rust", "lowspec-qwik-rust", "lean-next-hono")
+# (scenarios のキー, 表の行ラベル, 単位)
 ROWS = [
-    ("health_get_ms_median", "GET /api/health（中央値）", "ms"),
+    ("health_get_ms_median", "GET /api/health（中央値）※実装により null", "ms"),
     ("health_get_ms_p95", "GET /api/health（p95）", "ms"),
-    ("login_post_ms", "POST /api/auth/login（1 回・Rust 系）", "ms"),
-    ("items_get_ms_median", "GET /api/items（中央値・要 Bearer）", "ms"),
+    (
+        "login_post_ms",
+        "認証レイテンシ（1 回・ms）※graphql-*: GraphQL authLogin／lean-rest: REST POST /api/auth/login",
+        "ms",
+    ),
+    ("items_get_ms_median", "GET /api/items（中央値・Bearer）※lean-rest のみ", "ms"),
     ("items_get_ms_p95", "GET /api/items（p95）", "ms"),
-    ("graphql_health_ms_median", "POST /api/graphql health（中央値）", "ms"),
-    ("graphql_health_ms_p95", "POST /api/graphql health（p95）", "ms"),
-    ("graphql_nested_ms_median", "POST /api/graphql nested（中央値）", "ms"),
-    ("graphql_nested_ms_p95", "POST /api/graphql nested（p95）", "ms"),
-    ("version_get_ms_median", "GET /api/version（中央値・lean）", "ms"),
+    ("graphql_health_ms_median", "POST /api/graphql query health（中央値）※graphql-only", "ms"),
+    ("graphql_health_ms_p95", "POST /api/graphql query health（p95）", "ms"),
+    ("graphql_nested_ms_median", "POST /api/graphql items ネスト（中央値）※graphql-only", "ms"),
+    ("graphql_nested_ms_p95", "POST /api/graphql items ネスト（p95）", "ms"),
+    ("version_get_ms_median", "GET /api/version（中央値）※lean", "ms"),
     ("version_get_ms_p95", "GET /api/version（p95）", "ms"),
-    ("health_seq_80_approx_req_per_s", "health 連打 80 回の概算 req/s", "req/s"),
+    ("health_seq_80_approx_req_per_s", "GET /api/health 連打 80 回・概算 req/s", "req/s"),
 ]
 
 
@@ -67,8 +76,25 @@ def emit_table(by_impl: dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
+def emit_readme(by_impl: dict[str, dict]) -> str:
+    lines = [
+        "",
+        "### 表の読み方（比較可否）",
+        "",
+        "- **perf / lowspec** の列は **`api_flavor: graphql-only`**（または `rust` エイリアス）の結果を想定。**`graphql_*` と認証行（authLogin）**が横比較の主対象。",
+        "- **lean-next-hono** は **`lean-rest`** を想定。**`items_get_*`・認証行・`version_*`** が主対象。**`graphql_*` は未実装のため常に —**。",
+        "- **—** は「未計測・非対応・2xx なし」のいずれか。詳細は各 JSON の `notes` と `benchmarks/scenarios/API_MATRIX.md`。",
+        "",
+    ]
+    for impl in IMPL_ORDER:
+        data = by_impl.get(impl)
+        flavor = (data or {}).get("api_flavor", "（不明）")
+        lines.append(f"- **{impl}**: 直近 JSON の `api_flavor` = `{flavor}`")
+    return "\n".join(lines)
+
+
 def emit_meta(by_impl: dict[str, dict]) -> str:
-    lines = ["", "### メタ（各列の計測ソース）", ""]
+    lines = ["", "### メタ（計測ソース・備考）", ""]
     for impl in IMPL_ORDER:
         data = by_impl.get(impl)
         if not data:
@@ -76,9 +102,12 @@ def emit_meta(by_impl: dict[str, dict]) -> str:
             continue
         stamp = data.get("utc_stamp", "?")
         base = data.get("base_url", "?")
+        flavor = data.get("api_flavor", "?")
         notes = data.get("notes") or []
         n = "；".join(notes) if notes else "（備考なし）"
-        lines.append(f"- **{impl}**: `{impl}_{stamp}.json` · `{base}` · {n}")
+        lines.append(
+            f"- **{impl}**: `{impl}_{stamp}.json` · `{base}` · **api_flavor=`{flavor}`** · {n}"
+        )
     return "\n".join(lines)
 
 
@@ -90,6 +119,7 @@ def main() -> int:
         return 1
     by_impl = latest_per_impl(results)
     print(emit_table(by_impl))
+    print(emit_readme(by_impl))
     print(emit_meta(by_impl))
     return 0
 

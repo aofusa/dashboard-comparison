@@ -10,7 +10,11 @@ bench_curl_time() {
   [[ "${ec}" -ne 0 ]] && return 0
   time="$(echo "${raw}" | sed -n '1p')"
   code="$(echo "${raw}" | sed -n '2p')"
-  [[ "${code}" =~ ^2[0-9][0-9]$ ]] && echo "${time}"
+  if [[ "${code}" =~ ^2[0-9][0-9]$ ]]; then
+    echo "${time}"
+  elif [[ -n "${BENCH_VERBOSE:-}" ]]; then
+    echo "[bench-lib] 非2xx ${code}（計測除外）: $*" >&2
+  fi
   return 0
 }
 

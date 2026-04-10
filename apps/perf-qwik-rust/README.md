@@ -110,7 +110,7 @@ cd apps/perf-qwik-rust/frontend && npm install && npm start
 
 ## ベンチマーク
 
-`benchmarks/run-scenarios.sh`（`run-perf-qwik-rust.sh`）の **REST 系**は現行バックエンドと **非互換**（GraphQL のみのため）。**GraphQL** の `curl` は `POST /api/graphql` で利用可能。手動例は本 README の **curl 例**およびモノレポ直下 `README.md` の **「ベンチマークと実装の対応」** を参照。
+`run-perf-qwik-rust.sh` は **`BENCH_API_FLAVOR=graphql-only`** で **GraphQL** を計測します（`rust` はエイリアス）。**GraphQL** の `curl` は `POST /api/graphql`。対応表は **`benchmarks/scenarios/API_MATRIX.md`**、Runbook はルート **`README.md` の「ベンチマーク（Runbook）」**。手動例は本 README の **curl 例**も併せて参照。
 
 ---
 

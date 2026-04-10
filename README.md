@@ -7,7 +7,7 @@
 | perf-qwik-rust | `specs/performance-qwik-rust-v1.4.1.md` |
 | lowspec-qwik-rust | `specs/lowspec-qwik-rust-v1.5.2.md` |
 | lean-next-hono | `specs/lean-next-hono-v4.1.1.md` |
-| 比較メモ | `specs/dashboard-comparison_1.0.md` / `specs/dashboard-comparison.md` |
+| 比較の入口 | **`specs/dashboard-comparison.md`**（短い SSOT）／`specs/dashboard-comparison_1.0.md`（歴史的長文・冒頭に現行への誘導） |
 
 ## 実装概要
 
@@ -39,50 +39,80 @@ cd ../frontend && npm install && npm start
 
 ```bash
 cd apps/lean-next-hono && cp .env.example .env && npm install && npm run dev
-# MySQL 起動後: npm run db:push
+# MySQL 起動後: npm run db:push && npm run db:seed
 ```
 
-## ベンチマーク
+## ベンチマーク（Runbook）
+
+### 公平比較のポリシー（一文）
+
+**perf と lowspec は GraphQL 同士（`graphql-only`）で横比較し、REST 系の数値は lean（`lean-rest`）列のみを主に解釈する。**
+
+### 事前準備
 
 ```bash
 chmod +x benchmarks/*.sh benchmarks/lib/*.sh
+```
+
+- **依存**: `curl`、集計に **`jq`** を推奨（GraphQL の token 抽出）。`python3`（JSON 出力・表生成）。
+- **シード**: perf/lowspec は各 README の開発ユーザー（既定 `dev@example.com` / `devpass`）。**lean `lean-rest` は `npm run db:seed` 必須**。
+- **オリジン**: lean は **`AUTH_URL` / `NEXTAUTH_URL` とブラウザ・ベンチのホストを一致**（`localhost` と `127.0.0.1` 混在はセッション周りで不具合になり得る）。ベンチは **`BASE_URL` を実際の listen に合わせる**。
+
+### 各実装の前提（既定ポート例）
+
+| 実装 | 既定 `BASE_URL` 例 | `run-*.sh` が設定する `BENCH_API_FLAVOR` |
+|------|---------------------|------------------------------------------|
+| perf-qwik-rust | `http://127.0.0.1:8080` | `graphql-only` |
+| lowspec-qwik-rust | `http://127.0.0.1:8080`（perf と同時なら `8081` 等に変更） | `graphql-only` |
+| lean-next-hono | `http://127.0.0.1:3000` または `http://localhost:3000` | `lean-rest` |
+
+### 実行コマンド
+
+```bash
+# 個別
 ./benchmarks/run-perf-qwik-rust.sh
 BASE_URL=http://127.0.0.1:8081 ./benchmarks/run-lowspec-qwik-rust.sh
-./benchmarks/run-lean-next-hono.sh
+BASE_URL=http://localhost:3000 ./benchmarks/run-lean-next-hono.sh
+
+# 連続（各スクリプトの成否は || true で継続）
+./benchmarks/run-all-comparison.sh
+
+# Markdown 表（stdout）
 python3 tools/generate-comparison-table.py
 ```
 
-### ベンチマークと実装の対応
+**lean を匿名 GET のみで測る場合**（DB 不要・軽量）:
 
-`benchmarks/run-scenarios.sh` の **`BENCH_API_FLAVOR=rust`**（`run-perf-qwik-rust.sh` / `run-lowspec-qwik-rust.sh` が使用）は、**`GET /api/health`・`POST /api/auth/login`・`GET /api/items?...`** を前提にしています。
+```bash
+BENCH_API_FLAVOR=lean-public BASE_URL=http://localhost:3000 \
+  BENCH_IMPL=lean-next-hono bash benchmarks/run-scenarios.sh
+```
 
-- **lowspec-qwik-rust / perf-qwik-rust（現行）**: 上記 **REST は削除済み**のため、同スクリプトでは **ヘルス・ログイン・items 行が失敗／未計測**になり得ます。**GraphQL 部分**（`POST /api/graphql` の health / nested items）は現行バックエンドと一致します。
-- **lean-next-hono**: **`run-lean-next-hono.sh`** は `BENCH_API_FLAVOR=lean-public` で **`/api/health`・`/api/version`** 中心（items / GraphQL はシナリオから除外）。**手動の REST スモーク**（ログイン・items 等）は `apps/lean-next-hono/README.md` の curl 例どおり利用可能です。
+（通常は `run-lean-next-hono.sh` が `lean-rest` を設定します。）
 
-**lowspec / perf の手動スモーク（GraphQL のみ・`BASE_URL` を実際の listen に）**
+### 期待される JSON（`benchmarks/results/<impl>_<UTC>.json`）
 
-1. **health**（匿名）:
-   ```bash
-   BASE_URL="${BASE_URL:-http://127.0.0.1:8080}"
-   curl -sS -X POST "$BASE_URL/api/graphql" \
-     -H 'Content-Type: application/json' \
-     -d '{"query":"query { health }"}'
-   ```
-2. **ログイン**（Mutation・Cookie jar を使う場合は `-c`/`-b` を追加）:
-   ```bash
-   curl -sS -X POST "$BASE_URL/api/graphql" -H 'Content-Type: application/json' \
-     -d '{"query":"mutation { authLogin(email: \"dev@example.com\", password: \"devpass\") { token refreshToken expiresIn } }"}'
-   ```
-   応答 JSON の `data.authLogin.token` を確認。
-3. **items（ページング）**（`TOKEN` を上記から設定）:
-   ```bash
-   curl -sS -X POST "$BASE_URL/api/graphql" \
-     -H 'Content-Type: application/json' \
-     -H "Authorization: Bearer $TOKEN" \
-     -d '{"query":"query { items(page: 1, pageSize: 10) { total items { id title user { email } } } }"}'
-   ```
+- 全 flavor 共通で **`scenarios` のキー集合は同じ**（未計測は `null`）。
+- **`api_flavor`**: 実際に使った flavor（`rust` を渡すと JSON には `rust` のまま、挙動は `graphql-only`）。
+- **`notes`**: エイリアス説明、スキップ理由など。
+- **perf/lowspec（`graphql-only`）**: `graphql_health_*`・`graphql_nested_*`・**`login_post_ms`（GraphQL authLogin）** が主。`items_get_*` は **null**。`GET /api/health` は **null になりがち**（lowspec は REST health なし）。
+- **lean（`lean-rest`）**: `health_*`・`login_post_ms`（REST）・`items_get_*`・`version_*` が主。**`graphql_*` は null**。
 
-シナリオ一覧の表形式まとめは `benchmarks/scenarios/README.md`。ベンチスクリプトの GraphQL 対応は別タスク。計画書と現状表の差分索引は `specs/artifacts/dashboard-template-plan-vs-implement-gap_20260406.md`。
+### デバッグ
+
+```bash
+export BENCH_VERBOSE=1
+```
+
+### シナリオ対応表（詳細）
+
+**[`benchmarks/scenarios/API_MATRIX.md`](benchmarks/scenarios/API_MATRIX.md)** を参照。
+
+### 関連ドキュメント
+
+- `benchmarks/scenarios/README.md` … flavor 要約・JSON スキーマの索引
+- `specs/dashboard-comparison.md` … 比較の読み方・ベンチとの関係
+- `specs/artifacts/dashboard-template-plan-vs-implement-gap_20260410.md` … 計画対現状ギャップ（最新版）
 
 ## ライセンス
 

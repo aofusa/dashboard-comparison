@@ -83,4 +83,4 @@ cd frontend && npm install && npm start
 
 ## ベンチマークとの整合
 
-`benchmarks/run-scenarios.sh`（`BENCH_API_FLAVOR=rust`）は **REST ログイン・GET items** を前提とするため、**現行バックエンドとは一部非互換**です。手動確認は **GraphQL** の `curl` を使ってください（モノレポ直下 `README.md` の「ベンチマークと実装の対応」）。**REST でのベンチ・curl 比較**は **lean-next-hono** が担当します。計画書と現状表の差分は `specs/artifacts/dashboard-template-plan-vs-implement-gap_20260406.md`。
+モノレポの `run-lowspec-qwik-rust.sh` は **`BENCH_API_FLAVOR=graphql-only`**（`rust` は同一経路のエイリアス）で **GraphQL**（`health`・`authLogin`・nested items）を計測します。対応表は **`benchmarks/scenarios/API_MATRIX.md`**、手順はルート **`README.md` の「ベンチマーク（Runbook）」** を参照。**REST のベンチ比較**は **lean-next-hono（`lean-rest`）** が担当します。ギャップ索引の最新版は `specs/artifacts/dashboard-template-plan-vs-implement-gap_20260410.md`。

@@ -7,7 +7,7 @@ source "${DIR}/lib/bench-lib.sh"
 
 : "${BENCH_IMPL:=unknown}"
 : "${BASE_URL:=http://127.0.0.1:8080}"
-: "${BENCH_API_FLAVOR:=rust}"
+: "${BENCH_API_FLAVOR:=graphql-only}"
 : "${BENCH_EMAIL:=dev@example.com}"
 : "${BENCH_PASSWORD:=devpass}"
 : "${BENCH_SAMPLES_HEALTH:=20}"
@@ -20,8 +20,15 @@ OUT_JSON="${RESULTS_DIR}/${BENCH_IMPL}_${STAMP}.json"
 
 health_url="${BASE_URL}/api/health"
 version_url="${BASE_URL}/api/version"
+graphql_url="${BASE_URL}/api/graphql"
 
-read -r health_median health_p95 < <(bench_repeat "${BENCH_SAMPLES_HEALTH}" -X GET "${health_url}" | bench_stats_ms) || true
+# BENCH_API_FLAVOR の真実源は benchmarks/scenarios/API_MATRIX.md および benchmarks/scenarios/README.md を参照。
+EFFECTIVE_FLAVOR="${BENCH_API_FLAVOR}"
+notes=()
+if [[ "${BENCH_API_FLAVOR}" == "rust" ]]; then
+  EFFECTIVE_FLAVOR="graphql-only"
+  notes+=("BENCH_API_FLAVOR=rust は graphql-only と同一（後方互換）。新規は graphql-only 推奨")
+fi
 
 login_ms="null"
 items_ms_median="null"
@@ -35,8 +42,62 @@ version_ms_p95="null"
 seq_throughput=""
 notes_json="[]"
 
-notes=()
-if [[ "${BENCH_API_FLAVOR}" == "rust" ]]; then
+read -r health_median health_p95 < <(bench_repeat "${BENCH_SAMPLES_HEALTH}" -X GET "${health_url}" | bench_stats_ms) || true
+
+gql_auth_mutation_body() {
+  # GraphQL 文字列内の " は JSON エスケープ（メール・パスワードに " を含めないこと）
+  printf '{"query":"mutation { authLogin(email: \"%s\", password: \"%s\") { token refreshToken expiresIn } }"}' \
+    "${BENCH_EMAIL}" "${BENCH_PASSWORD}"
+}
+
+graphql_login_token() {
+  local raw code resp
+  raw="$(curl -s --connect-timeout 2 --max-time 30 -w '\n%{http_code}' -X POST "${graphql_url}" \
+    -H 'Content-Type: application/json' \
+    -d "$(gql_auth_mutation_body)" 2>/dev/null || true)"
+  code="$(echo "${raw}" | tail -n1)"
+  resp="$(echo "${raw}" | sed '$d')"
+  if [[ ! "${code}" =~ ^2[0-9][0-9]$ ]]; then
+    echo ""
+    return 0
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    echo "${resp}" | jq -r '.data.authLogin.token // empty' 2>/dev/null || true
+  else
+    echo "${resp}" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+  fi
+}
+
+if [[ "${EFFECTIVE_FLAVOR}" == "graphql-only" ]]; then
+  notes+=("graphql-only: GET /api/health は実装により null になり得る。認証は GraphQL authLogin。REST login/items は未計測")
+
+  gql='{"query":"query { health }"}'
+  read -r graphql_health_ms_median graphql_health_ms_p95 < <(bench_repeat 10 -X POST "${graphql_url}" \
+    -H 'Content-Type: application/json' \
+    -d "${gql}" | bench_stats_ms) || true
+
+  t0="$(bench_curl_time -X POST "${graphql_url}" \
+    -H 'Content-Type: application/json' \
+    -d "$(gql_auth_mutation_body)")"
+  if [[ -n "${t0}" ]]; then
+    login_ms="$(awk -v s="${t0}" 'BEGIN{printf "%.3f", s * 1000}')"
+  fi
+  notes+=("login_post_ms は GraphQL authLogin（1 回サンプル・ms）")
+
+  token="$(graphql_login_token)"
+  if [[ -n "${token}" ]]; then
+    gql2='{"query":"query { items(page: 1, pageSize: 5) { total items { id title user { email } } } }"}'
+    read -r graphql_nested_ms_median graphql_nested_ms_p95 < <(bench_repeat 8 -X POST "${graphql_url}" \
+      -H 'Content-Type: application/json' \
+      -H "Authorization: Bearer ${token}" \
+      -d "${gql2}" | bench_stats_ms) || true
+  else
+    notes+=("authLogin 失敗または token 抽出不可（nested GraphQL スキップ）")
+  fi
+
+elif [[ "${EFFECTIVE_FLAVOR}" == "lean-rest" ]]; then
+  notes+=("lean-rest: REST login/items + GET /api/version。GraphQL は未実装のため graphql_* は null")
+
   login_body="$(printf '%s' "{\"email\":\"${BENCH_EMAIL}\",\"password\":\"${BENCH_PASSWORD}\"}")"
   t0="$(bench_curl_time -X POST "${BASE_URL}/api/auth/login" \
     -H 'Content-Type: application/json' \
@@ -62,27 +123,19 @@ if [[ "${BENCH_API_FLAVOR}" == "rust" ]]; then
   if [[ -n "${token}" ]]; then
     read -r items_ms_median items_ms_p95 < <(bench_repeat "${BENCH_SAMPLES_AUTH}" -X GET "${BASE_URL}/api/items?page=1&pageSize=10" \
       -H "Authorization: Bearer ${token}" | bench_stats_ms) || true
-
-    gql='{"query":"query { health }"}'
-    read -r graphql_health_ms_median graphql_health_ms_p95 < <(bench_repeat 10 -X POST "${BASE_URL}/api/graphql" \
-      -H 'Content-Type: application/json' \
-      -d "${gql}" | bench_stats_ms) || true
-
-    gql2='{"query":"query { items(page: 1, pageSize: 5) { total items { id title user { email } } } }"}'
-    read -r graphql_nested_ms_median graphql_nested_ms_p95 < <(bench_repeat 8 -X POST "${BASE_URL}/api/graphql" \
-      -H 'Content-Type: application/json' \
-      -H "Authorization: Bearer ${token}" \
-      -d "${gql2}" | bench_stats_ms) || true
   else
     if [[ -n "${login_code}" ]] && [[ ! "${login_code}" =~ ^2[0-9][0-9]$ ]]; then
-      notes+=("login failed: HTTP ${login_code} (items/graphql skipped)")
+      notes+=("REST login failed: HTTP ${login_code}（items スキップ）")
     else
-      notes+=("login failed: no token in JSON (items/graphql skipped)")
+      notes+=("REST login: token なし（items スキップ）。db:seed と AUTH_URL/localhost 整合を確認")
     fi
   fi
-elif [[ "${BENCH_API_FLAVOR}" == "lean-public" ]]; then
+
   read -r version_ms_median version_ms_p95 < <(bench_repeat 10 -X GET "${version_url}" | bench_stats_ms) || true
-  notes+=("items/graphql は NextAuth 必須のため未計測")
+
+elif [[ "${EFFECTIVE_FLAVOR}" == "lean-public" ]]; then
+  read -r version_ms_median version_ms_p95 < <(bench_repeat 10 -X GET "${version_url}" | bench_stats_ms) || true
+  notes+=("lean-public: 匿名で叩ける GET のみ（/api/health・/api/version）。login/items/graphql は未計測")
 else
   notes+=("unknown BENCH_API_FLAVOR=${BENCH_API_FLAVOR}")
 fi
@@ -122,6 +175,7 @@ data = {
     "api_flavor": os.environ.get("BENCH_API_FLAVOR", ""),
     "utc_stamp": os.environ.get("STAMP", ""),
     "scenarios": {
+        # キーは tools/generate-comparison-table.py の ROWS と対応（変更時は両方更新）
         "health_get_ms_median": num_or_none(os.environ.get("E_HEALTH_MED")),
         "health_get_ms_p95": num_or_none(os.environ.get("E_HEALTH_P95")),
         "login_post_ms": num_or_none(os.environ.get("E_LOGIN")),
@@ -141,5 +195,5 @@ with open(out, "w") as f:
     json.dump(data, f, indent=2)
 PY
 
-echo "[bench] wrote ${OUT_JSON}"
+echo "[bench] BENCH_API_FLAVOR=${BENCH_API_FLAVOR} effective=${EFFECTIVE_FLAVOR} -> ${OUT_JSON}"
 cat "${OUT_JSON}"
