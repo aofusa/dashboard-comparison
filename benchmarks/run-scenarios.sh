@@ -45,9 +45,27 @@ notes_json="[]"
 read -r health_median health_p95 < <(bench_repeat "${BENCH_SAMPLES_HEALTH}" -X GET "${health_url}" | bench_stats_ms) || true
 
 gql_auth_mutation_body() {
-  # GraphQL 文字列内の " は JSON エスケープ（メール・パスワードに " を含めないこと）
-  printf '{"query":"mutation { authLogin(email: \"%s\", password: \"%s\") { token refreshToken expiresIn } }"}' \
-    "${BENCH_EMAIL}" "${BENCH_PASSWORD}"
+  # GraphQL 変数で認証情報を渡し、シェル printf の \" 解釈で JSON が壊れる問題を避ける（指示書 20260410）
+  BENCH_EMAIL="${BENCH_EMAIL}" BENCH_PASSWORD="${BENCH_PASSWORD}" python3 <<'PY'
+import json, os
+
+q = (
+    "mutation ($email: String!, $password: String!) "
+    "{ authLogin(email: $email, password: $password) { token refreshToken expiresIn } }"
+)
+print(
+    json.dumps(
+        {
+            "query": q,
+            "variables": {
+                "email": os.environ["BENCH_EMAIL"],
+                "password": os.environ["BENCH_PASSWORD"],
+            },
+        },
+        separators=(",", ":"),
+    )
+)
+PY
 }
 
 # authLogin 応答ボディを python3 で解析（jq 非依存）。stdout: 1 行目 token、2 行目 errors 要約（最大 220 文字）
