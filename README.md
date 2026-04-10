@@ -54,16 +54,17 @@ cd apps/lean-next-hono && cp .env.example .env && npm install && npm run dev
 chmod +x benchmarks/*.sh benchmarks/lib/*.sh
 ```
 
-- **依存**: `curl`、集計に **`jq`** を推奨（GraphQL の token 抽出）。`python3`（JSON 出力・表生成）。
-- **シード**: perf/lowspec は各 README の開発ユーザー（既定 `dev@example.com` / `devpass`）。**lean `lean-rest` は `npm run db:seed` 必須**。
-- **オリジン**: lean は **`AUTH_URL` / `NEXTAUTH_URL` とブラウザ・ベンチのホストを一致**（`localhost` と `127.0.0.1` 混在はセッション周りで不具合になり得る）。ベンチは **`BASE_URL` を実際の listen に合わせる**。
+- **依存**: `curl`、`python3`（JSON 出力・GraphQL 応答解析・表生成）。集計に **`jq`** を推奨（`lean-rest` の token 抽出など）。
+- **シード**: perf/lowspec は各 README の開発ユーザー（既定 `dev@example.com` / `devpass`）。**lean `lean-rest` は `npm run db:seed` 必須**。GraphQL ベンチ前に **実 DB のユーザーと `BENCH_EMAIL` / `BENCH_PASSWORD` が一致**していることを確認（詳細は `benchmarks/scenarios/README.md`）。
+- **オリジン**: lean は **`AUTH_URL` / `NEXTAUTH_URL` とブラウザ・ベンチのホストを一致**（`localhost` と `127.0.0.1` 混在はセッション周りで不具合になり得る）。
+- **`BASE_URL` と `BIND_ADDR`**: **`run-perf-qwik-rust.sh` / `run-lowspec-qwik-rust.sh`** は、`BASE_URL` 未指定時に各 `apps/*/backend/.env` の **`BIND_ADDR`** から `http://<BIND_ADDR>` を合成する（手動の `BASE_URL` が最優先）。8080 が別プロセスと衝突する環境でも、`.env` とベンチがずれにくい。決定順の全文は **`benchmarks/scenarios/API_MATRIX.md`** を参照。
 
 ### 各実装の前提（既定ポート例）
 
 | 実装 | 既定 `BASE_URL` 例 | `run-*.sh` が設定する `BENCH_API_FLAVOR` |
 |------|---------------------|------------------------------------------|
-| perf-qwik-rust | `http://127.0.0.1:8080` | `graphql-only` |
-| lowspec-qwik-rust | `http://127.0.0.1:8080`（perf と同時なら `8081` 等に変更） | `graphql-only` |
+| perf-qwik-rust | **`backend/.env` の `BIND_ADDR`** に追随（無ければ `http://127.0.0.1:8080`） | `graphql-only` |
+| lowspec-qwik-rust | 同上（例: `.env` で `28080` なら `http://127.0.0.1:28080`） | `graphql-only` |
 | lean-next-hono | `http://127.0.0.1:3000` または `http://localhost:3000` | `lean-rest` |
 
 ### 実行コマンド
@@ -102,6 +103,8 @@ BENCH_API_FLAVOR=lean-public BASE_URL=http://localhost:3000 \
 
 ```bash
 export BENCH_VERBOSE=1
+# GraphQL authLogin の HTTP とマスク済みボディ（perf/lowspec）
+export BENCH_DUMP_AUTH_LOGIN=1
 ```
 
 ### シナリオ対応表（詳細）

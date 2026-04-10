@@ -2,6 +2,16 @@
 
 `run-scenarios.sh` の **`BENCH_API_FLAVOR`** と、各アプリが実際に提供する API の対応です。計測の可否は **2xx のみ採用**（`benchmarks/lib/bench-lib.sh`）です。
 
+## BASE_URL の決定順序（perf / lowspec の `run-*.sh`）
+
+1. **`BASE_URL` が既に環境にあればそれを使う**（手動指定が最優先）。
+2. 任意で **`BENCH_ENV_FILE`**（`benchmarks/` からの相対または絶対パス）を **source** したうえで、まだ `BASE_URL` が空なら次へ。
+3. **`BENCH_ENV_FILE` があれば**そのファイルから **`BIND_ADDR=host:port`** を読み、`http://<BIND_ADDR>` を合成（`BENCH_USE_TLS=1` なら `https://`）。
+4. **`BENCH_ENV_FILE` が無ければ**各実装の `apps/<impl>/backend/.env` から `BIND_ADDR` を読む。
+5. **`BIND_ADDR` が取れない**場合は **`http://127.0.0.1:8080`** にフォールバック（stderr にその旨）。
+
+`run-scenarios.sh` を**直接**呼ぶ場合は従来どおり `: "${BASE_URL:=http://127.0.0.1:8080}"` が効きます。
+
 ## 凡例
 
 | 記号 | 意味 |

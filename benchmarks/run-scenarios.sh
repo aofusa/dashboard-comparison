@@ -50,22 +50,76 @@ gql_auth_mutation_body() {
     "${BENCH_EMAIL}" "${BENCH_PASSWORD}"
 }
 
-graphql_login_token() {
-  local raw code resp
-  raw="$(curl -s --connect-timeout 2 --max-time 30 -w '\n%{http_code}' -X POST "${graphql_url}" \
-    -H 'Content-Type: application/json' \
-    -d "$(gql_auth_mutation_body)" 2>/dev/null || true)"
-  code="$(echo "${raw}" | tail -n1)"
-  resp="$(echo "${raw}" | sed '$d')"
-  if [[ ! "${code}" =~ ^2[0-9][0-9]$ ]]; then
-    echo ""
-    return 0
-  fi
-  if command -v jq >/dev/null 2>&1; then
-    echo "${resp}" | jq -r '.data.authLogin.token // empty' 2>/dev/null || true
-  else
-    echo "${resp}" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
-  fi
+# authLogin 応答ボディを python3 で解析（jq 非依存）。stdout: 1 行目 token、2 行目 errors 要約（最大 220 文字）
+gql_auth_parse_body() {
+  local bodyf="$1"
+  python3 - "$bodyf" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    text = open(path, "r", encoding="utf-8", errors="replace").read()
+except OSError as e:
+    print("")
+    print(f"read error: {e}"[:220])
+    raise SystemExit(0)
+try:
+    j = json.loads(text)
+except Exception as e:
+    print("")
+    print(f"JSON parse: {e!s}"[:220])
+    raise SystemExit(0)
+errs = j.get("errors") or []
+data = j.get("data")
+tok = ""
+if isinstance(data, dict):
+    al = data.get("authLogin")
+    if isinstance(al, dict):
+        t = al.get("token")
+        if t:
+            tok = str(t)
+msgs = []
+for e in errs[:5]:
+    if isinstance(e, dict) and e.get("message"):
+        msgs.append(str(e["message"]))
+    elif isinstance(e, str):
+        msgs.append(e)
+err_summary = "; ".join(msgs)[:220]
+print(tok)
+print(err_summary)
+PY
+}
+
+gql_auth_dump_body_masked() {
+  local bodyf="$1"
+  python3 - "$bodyf" <<'PY'
+import json, sys
+p = sys.argv[1]
+try:
+    raw = open(p, "r", encoding="utf-8", errors="replace").read()
+except OSError as e:
+    print(f"(read error: {e})", file=sys.stderr)
+    raise SystemExit(0)
+try:
+    j = json.loads(raw)
+
+    def redact(o):
+        if isinstance(o, dict):
+            for k, v in list(o.items()):
+                lk = str(k).lower()
+                if lk in ("token", "refreshtoken", "password", "authorization"):
+                    o[k] = "***" if v else v
+                else:
+                    redact(v)
+        elif isinstance(o, list):
+            for x in o:
+                redact(x)
+
+    redact(j)
+    s = json.dumps(j, ensure_ascii=False)
+except Exception:
+    s = raw
+print(s[:900], file=sys.stderr)
+PY
 }
 
 if [[ "${EFFECTIVE_FLAVOR}" == "graphql-only" ]]; then
@@ -76,15 +130,44 @@ if [[ "${EFFECTIVE_FLAVOR}" == "graphql-only" ]]; then
     -H 'Content-Type: application/json' \
     -d "${gql}" | bench_stats_ms) || true
 
-  t0="$(bench_curl_time -X POST "${graphql_url}" \
+  # authLogin は 1 本の curl でボディ・HTTP コード・時間を取得（計測と token 抽出の不整合を防ぐ）
+  bodyf="$(mktemp)"
+  curl_out="$(curl -sS --connect-timeout 2 --max-time 60 \
+    -o "${bodyf}" -w "%{time_total}\n%{http_code}" \
+    -X POST "${graphql_url}" \
     -H 'Content-Type: application/json' \
-    -d "$(gql_auth_mutation_body)")"
-  if [[ -n "${t0}" ]]; then
-    login_ms="$(awk -v s="${t0}" 'BEGIN{printf "%.3f", s * 1000}')"
+    -d "$(gql_auth_mutation_body)" 2>/dev/null || printf '0\n000')"
+  mapfile -t _curl_meta <<< "${curl_out}"
+  time_s="${_curl_meta[0]:-0}"
+  time_s="${time_s//$'\r'/}"
+  if ((${#_curl_meta[@]} >= 2)); then
+    code="${_curl_meta[1]}"
+  else
+    code="000"
   fi
-  notes+=("login_post_ms は GraphQL authLogin（1 回サンプル・ms）")
+  code="${code//$'\r'/}"
+  if [[ "${BENCH_DUMP_AUTH_LOGIN:-}" == "1" ]]; then
+    echo "[bench] BENCH_DUMP_AUTH_LOGIN authLogin HTTP=${code} body (masked, prefix):" >&2
+    gql_auth_dump_body_masked "${bodyf}"
+  fi
+  mapfile -t _gql_auth_lines < <(gql_auth_parse_body "${bodyf}")
+  rm -f "${bodyf}"
+  token="${_gql_auth_lines[0]:-}"
+  gql_err_sum="${_gql_auth_lines[1]:-}"
 
-  token="$(graphql_login_token)"
+  if [[ "${code}" =~ ^2[0-9][0-9]$ ]]; then
+    login_ms="$(awk -v s="${time_s}" 'BEGIN{printf "%.3f", s * 1000}')"
+    if [[ -n "${gql_err_sum}" ]]; then
+      notes+=("GraphQL errors (authLogin): ${gql_err_sum}")
+    fi
+  else
+    notes+=("authLogin HTTP ${code}（非2xx・login_post_ms 未計測）")
+    if [[ -n "${gql_err_sum}" ]]; then
+      notes+=("応答ボディ errors 要約: ${gql_err_sum}")
+    fi
+  fi
+  notes+=("login_post_ms は GraphQL authLogin（1 回・片道 ms; HTTP 2xx 時は GraphQL errors があっても計測）")
+
   if [[ -n "${token}" ]]; then
     gql2='{"query":"query { items(page: 1, pageSize: 5) { total items { id title user { email } } } }"}'
     read -r graphql_nested_ms_median graphql_nested_ms_p95 < <(bench_repeat 8 -X POST "${graphql_url}" \
@@ -92,7 +175,15 @@ if [[ "${EFFECTIVE_FLAVOR}" == "graphql-only" ]]; then
       -H "Authorization: Bearer ${token}" \
       -d "${gql2}" | bench_stats_ms) || true
   else
-    notes+=("authLogin 失敗または token 抽出不可（nested GraphQL スキップ）")
+    if [[ "${code}" =~ ^2[0-9][0-9]$ ]]; then
+      if [[ -z "${gql_err_sum}" ]]; then
+        notes+=("authLogin は 2xx だが token 抽出不可（nested GraphQL スキップ）")
+      else
+        notes+=("nested GraphQL スキップ（token なし）")
+      fi
+    else
+      notes+=("nested GraphQL スキップ（authLogin が非2xx または接続失敗）")
+    fi
   fi
 
 elif [[ "${EFFECTIVE_FLAVOR}" == "lean-rest" ]]; then
