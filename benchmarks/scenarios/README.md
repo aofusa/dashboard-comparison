@@ -22,8 +22,17 @@
 `tools/generate-comparison-table.py` の行と **キー名で対応**しています（変更時は Python 側も更新）。
 
 - `implementation` / `base_url` / `api_flavor` / `utc_stamp`
+- `bench_session_stamp` / `bench_round` / `bench_rounds_total` … **`BENCH_ROUNDS` > 1** のとき（複数ラウンド）。単回実行では `bench_rounds_total` は `1`。
 - `scenarios.*` … `health_get_ms_median` 等（`run-scenarios.sh` 内コメント参照）
 - `notes` … 文字列配列（エイリアス・未計測理由など）
+
+## release / production 相当のプロセス（推奨）
+
+数値比較を歪めないため、**Rust は `cargo build --release` のバイナリ**、**lean は `next build` + `next start`** を推奨。詳細はルート `README.md` の「ベンチマーク（Runbook）」を参照。
+
+## 複数回実行（`BENCH_ROUNDS`）
+
+`run-scenarios.sh` は **`BENCH_ROUNDS`**（既定 `1`）回、同一 `BASE_URL` 上でシナリオを繰り返し、**`BENCH_ROUNDS=1` のときだけ**従来ファイル名 `<impl>_<UTC>.json`、**2 以上**のとき `<impl>_<UTC>_r01.json` … を出力します。ラウンド間隔は **`BENCH_ROUND_SLEEP_SEC`**（既定 `0`）。`tools/generate-comparison-table.py` は **最新セッションの最終ラウンド**（`_rNN` が最大）を表に採用します。
 
 ## デバッグ
 

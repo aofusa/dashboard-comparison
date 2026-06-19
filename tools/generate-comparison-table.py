@@ -3,6 +3,12 @@
 
 JSON の `scenarios` キーは benchmarks/run-scenarios.sh の python3 埋め込みと対応。
 変更する場合は run-scenarios.sh 側の dict キーと必ず揃えること。
+
+「各実装の最新 1 件」の定義:
+- ファイル名が `{impl}_{YYYYMMDDTHHMMSSZ}.json` または `{impl}_{同スタンプ}_rNN.json`（複数ラウンド）。
+- 同一 impl について、(1) `utc_stamp`（ファイル名の日時部分）が最大のバッチを採用し、
+  (2) そのバッチ内に `_rNN` がある場合は **NN が最大**のファイルを採用（最終ラウンド）。
+  (3) `_r` 無しの単一ファイルのみの場合はその 1 件。
 """
 from __future__ import annotations
 
@@ -32,6 +38,11 @@ ROWS = [
     ("health_seq_80_approx_req_per_s", "GET /api/health 連打 80 回・概算 req/s", "req/s"),
 ]
 
+# impl_20260410T154735Z.json または impl_20260410T154735Z_r03.json
+FN_PAT = re.compile(
+    r"^(" + "|".join(re.escape(x) for x in IMPL_ORDER) + r")_(\d{8}T\d{6}Z)(?:_r(\d{2}))?\.json$"
+)
+
 
 def fmt_val(v: object, unit: str) -> str:
     if v is None:
@@ -43,22 +54,32 @@ def fmt_val(v: object, unit: str) -> str:
     return str(v)
 
 
-def latest_per_impl(results_dir: Path) -> dict[str, dict]:
-    best: dict[str, tuple[str, dict]] = {}
-    pat = re.compile(r"^(" + "|".join(re.escape(x) for x in IMPL_ORDER) + r")_(\d{8}T\d{6}Z)\.json$")
+def latest_per_impl_and_paths(results_dir: Path) -> tuple[dict[str, dict], dict[str, Path]]:
+    """各 impl について「最新セッションの最終ラウンド」相当の JSON とパスを選ぶ。"""
+    # impl -> (best_stamp, best_round, path, data) best_round: _rNN の NN、無しは 0
+    best: dict[str, tuple[str, int, Path, dict]] = {}
     for p in sorted(results_dir.glob("*.json")):
-        m = pat.match(p.name)
+        m = FN_PAT.match(p.name)
         if not m:
             continue
-        impl, stamp = m.group(1), m.group(2)
-        prev = best.get(impl)
-        if prev is None or stamp > prev[0]:
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            best[impl] = (stamp, data)
-    return {k: v[1] for k, v in best.items()}
+        impl, stamp, r_s = m.group(1), m.group(2), m.group(3)
+        rnum = int(r_s, 10) if r_s else 0
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        cur = best.get(impl)
+        if cur is None:
+            best[impl] = (stamp, rnum, p, data)
+            continue
+        c_stamp, c_r, _, _ = cur
+        if stamp > c_stamp:
+            best[impl] = (stamp, rnum, p, data)
+        elif stamp == c_stamp and rnum > c_r:
+            best[impl] = (stamp, rnum, p, data)
+    by_impl = {k: v[3] for k, v in best.items()}
+    paths = {k: v[2] for k, v in best.items()}
+    return by_impl, paths
 
 
 def emit_table(by_impl: dict[str, dict]) -> str:
@@ -84,6 +105,7 @@ def emit_readme(by_impl: dict[str, dict]) -> str:
         "- **perf / lowspec** の列は **`api_flavor: graphql-only`**（または `rust` エイリアス）の結果を想定。**`graphql_*` と認証行（authLogin）**が横比較の主対象。",
         "- **lean-next-hono** は **`lean-rest`** を想定。**`items_get_*`・認証行・`version_*`** が主対象。**`graphql_*` は未実装のため常に —**。",
         "- **—** は「未計測・非対応・2xx なし」のいずれか。詳細は各 JSON の `notes` と `benchmarks/scenarios/API_MATRIX.md`。",
+        "- **複数ラウンド**（`*_rNN.json`）がある場合、本表は **同一セッション内の最終ラウンド**を採用（`latest_per_impl_and_paths` の選定ロジック）。",
         "",
     ]
     for impl in IMPL_ORDER:
@@ -93,20 +115,27 @@ def emit_readme(by_impl: dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
-def emit_meta(by_impl: dict[str, dict]) -> str:
+def emit_meta(by_impl: dict[str, dict], paths: dict[str, Path]) -> str:
     lines = ["", "### メタ（計測ソース・備考）", ""]
     for impl in IMPL_ORDER:
         data = by_impl.get(impl)
+        p = paths.get(impl)
+        fname = p.name if p else "（該当 JSON なし）"
         if not data:
             lines.append(f"- **{impl}**: （該当 JSON なし）")
             continue
         stamp = data.get("utc_stamp", "?")
         base = data.get("base_url", "?")
         flavor = data.get("api_flavor", "?")
+        br = data.get("bench_round")
+        brt = data.get("bench_rounds_total")
+        round_note = ""
+        if isinstance(br, int) and isinstance(brt, int) and brt > 1:
+            round_note = f" · **round {br}/{brt}**"
         notes = data.get("notes") or []
         n = "；".join(notes) if notes else "（備考なし）"
         lines.append(
-            f"- **{impl}**: `{impl}_{stamp}.json` · `{base}` · **api_flavor=`{flavor}`** · {n}"
+            f"- **{impl}**: `{fname}` · `{base}` · **api_flavor=`{flavor}`**{round_note} · {n}"
         )
     return "\n".join(lines)
 
@@ -117,10 +146,10 @@ def main() -> int:
     if not results.is_dir():
         print(f"# results なし: {results}", file=sys.stderr)
         return 1
-    by_impl = latest_per_impl(results)
+    by_impl, paths = latest_per_impl_and_paths(results)
     print(emit_table(by_impl))
     print(emit_readme(by_impl))
-    print(emit_meta(by_impl))
+    print(emit_meta(by_impl, paths))
     return 0
 
 

@@ -2,6 +2,8 @@
 
 `run-scenarios.sh` の **`BENCH_API_FLAVOR`** と、各アプリが実際に提供する API の対応です。計測の可否は **2xx のみ採用**（`benchmarks/lib/bench-lib.sh`）です。
 
+**複数ラウンド**: 環境変数 **`BENCH_ROUNDS`**（既定 `1`）で同一条件を繰り返し、成果物は `benchmarks/scenarios/README.md` の「JSON 出力スキーマ」を参照。**比較用の表**（`tools/generate-comparison-table.py`）は **最新セッションの最終ラウンド**を採用します。
+
 ## BASE_URL の決定順序（perf / lowspec の `run-*.sh`）
 
 1. **`BASE_URL` が既に環境にあればそれを使う**（手動指定が最優先）。

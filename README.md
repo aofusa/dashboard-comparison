@@ -54,6 +54,11 @@ cd apps/lean-next-hono && cp .env.example .env && npm install && npm run dev
 chmod +x benchmarks/*.sh benchmarks/lib/*.sh
 ```
 
+- **計測対象プロセスは release / production 相当を推奨**（公平な数値比較のため）:
+  - **Rust バックエンド**: `cd apps/<app>/backend && cargo build --release` のうえ **`./target/release/lowspec_backend` / `perf_backend`** を起動（`cargo run` を使う場合も **`--release` 必須**）。
+  - **lean-next-hono**: **`npm run build`** のあと **`npm run start`**（`next start`）。ベンチの `BASE_URL` / `.env` の `AUTH_URL` とポートを一致（例: `PORT=3000 npm run start`）。開発サーバ（`npm run dev`）での計測は参考値に留まりがち。
+  - **Qwik フロント（lowspec / perf）**: GraphQL ベンチは **バックエンド URL への HTTP** が主で、フロント未起動でも実行可能。フロントまで揃える場合は `npm start` は開発用 Vite のため、厳密には **`npm run build` 後の `preview` 系**を検討（ビルド時間は長め）。
+- **親シェルに `BIND_ADDR` が残っていると** `dotenv` が `.env` を上書きできずバックエンドが起動に失敗することがある → 起動前に `unset BIND_ADDR` するか、`env -u BIND_ADDR ./target/release/...` を使う（`benchmarks/scenarios/README.md` も参照）。
 - **依存**: `curl`、`python3`（JSON 出力・GraphQL 応答解析・表生成）。集計に **`jq`** を推奨（`lean-rest` の token 抽出など）。
 - **シード**: perf/lowspec は各 README の開発ユーザー（既定 `dev@example.com` / `devpass`）。**lean `lean-rest` は `npm run db:seed` 必須**。GraphQL ベンチ前に **実 DB のユーザーと `BENCH_EMAIL` / `BENCH_PASSWORD` が一致**していることを確認（詳細は `benchmarks/scenarios/README.md`）。
 - **オリジン**: lean は **`AUTH_URL` / `NEXTAUTH_URL` とブラウザ・ベンチのホストを一致**（`localhost` と `127.0.0.1` 混在はセッション周りで不具合になり得る）。
@@ -75,10 +80,17 @@ chmod +x benchmarks/*.sh benchmarks/lib/*.sh
 BASE_URL=http://127.0.0.1:8081 ./benchmarks/run-lowspec-qwik-rust.sh
 BASE_URL=http://localhost:3000 ./benchmarks/run-lean-next-hono.sh
 
-# 連続（各スクリプトの成否は || true で継続）
-./benchmarks/run-all-comparison.sh
+# 同一サーバ上でシナリオを複数回（例: 3 回。各ラウンド別 JSON: *_r01.json …）
+export BENCH_ROUNDS=3
+# ラウンド間の休止秒（任意、既定 0）
+export BENCH_ROUND_SLEEP_SEC=2
+./benchmarks/run-perf-qwik-rust.sh
 
-# Markdown 表（stdout）
+# 連続（各スクリプトの成否は || true で継続）。第 1 引数で BENCH_ROUNDS を一括指定可能
+./benchmarks/run-all-comparison.sh
+./benchmarks/run-all-comparison.sh 3
+
+# Markdown 表（stdout）。複数ラウンド（*_rNN.json）がある場合は同一セッションの最終ラウンドを採用
 python3 tools/generate-comparison-table.py
 ```
 
@@ -91,9 +103,11 @@ BENCH_API_FLAVOR=lean-public BASE_URL=http://localhost:3000 \
 
 （通常は `run-lean-next-hono.sh` が `lean-rest` を設定します。）
 
-### 期待される JSON（`benchmarks/results/<impl>_<UTC>.json`）
+### 期待される JSON（`benchmarks/results/<impl>_<UTC>.json` または `<impl>_<UTC>_rNN.json`）
 
 - 全 flavor 共通で **`scenarios` のキー集合は同じ**（未計測は `null`）。
+- **`BENCH_ROUNDS=1`（既定）**: ファイル名は従来どおり `<impl>_<UTC>.json`。
+- **`BENCH_ROUNDS>1`**: 同一 `<UTC>`（セッション）で `<impl>_<UTC>_r01.json` … `_rNN.json` が出力され、各 JSON に **`bench_round`** / **`bench_rounds_total`** / **`bench_session_stamp`** が含まれる。
 - **`api_flavor`**: 実際に使った flavor（`rust` を渡すと JSON には `rust` のまま、挙動は `graphql-only`）。
 - **`notes`**: エイリアス説明、スキップ理由など。
 - **perf/lowspec（`graphql-only`）**: `graphql_health_*`・`graphql_nested_*`・**`login_post_ms`（GraphQL authLogin）** が主。`items_get_*` は **null**。`GET /api/health` は **null になりがち**（lowspec は REST health なし）。
