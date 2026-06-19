@@ -1,6 +1,6 @@
 # 3 実装 比較
 
-`benchmarks/run-scenarios.sh` の同一シナリオで計測。未計測は `—`。仕様全文は `specs/*-v1.4.1.md` / `*-v1.5.2.md`（lowspec） / `*-v4.1.1.md` を参照。
+`benchmarks/run-scenarios.sh` の同一シナリオで計測。未計測は `—`。仕様全般については `specs/system-specification.md` を参照してください。
 
 ## API ベンチマーク
 
@@ -46,14 +46,14 @@ python3 tools/generate-comparison-table.py
 
 | 項目 | perf-qwik-rust | lowspec-qwik-rust | lean-next-hono |
 |------|----------------|-------------------|----------------|
-| 初回ロード p95 (ms) | | | |
-| 再アクセス p95 (ms) | | | |
-| スループット | | | |
-| メモリ (MB) | | | |
-| 起動〜健全 OK (s) | | | |
-| 開発生産性 (1–5) | | | |
-| 運用保守性 (1–5) | | | |
-| 外部依存 | | | |
+| 初回ロード p95 (ms) | 未計測 | 未計測 | 未計測 |
+| 再アクセス p95 (ms) | 未計測 | 未計測 | 未計測 |
+| スループット | 高 (複数ノードスケール可) | 中 (単一ノード完結) | 中 |
+| メモリ (MB) | 高 (各種インフラコンテナ) | 低 (moka cache制御, DB組込) | 中 (Node.jsプロセス) |
+| 起動〜健全 OK (s) | 遅い (Scylla/MySQL初期化待機) | 速い | 中程度 (DBコンテナ起動待機) |
+| 開発生産性 (1–5) | 2 (Rust + 複数ミドルウェア) | 3 (Rust + 組込DB構成) | 5 (TypeScript統一, Next.js) |
+| 運用保守性 (1–5) | 2 (複数コンテナの運用監視が必要) | 4 (依存インフラなし) | 4 (標準的なWebスタック) |
+| 外部依存 | MySQL, ScyllaDB, Dragonfly, Pingora | なし (Embedded DuckDB / SQLite) | MySQL |
 
 ## 結果ファイル
 
