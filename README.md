@@ -4,10 +4,7 @@
 
 | アプリ | 仕様書（全文） |
 |--------|----------------|
-| perf-qwik-rust | `specs/performance-qwik-rust-v1.4.1.md` |
-| lowspec-qwik-rust | `specs/lowspec-qwik-rust-v1.5.2.md` |
-| lean-next-hono | `specs/lean-next-hono-v4.1.1.md` |
-| 比較の入口 | **`specs/dashboard-comparison.md`**（短い SSOT）／`specs/dashboard-comparison_1.0.md`（歴史的長文・冒頭に現行への誘導） |
+| 全アプリ共通・比較 | `specs/system-specification.md` |
 
 ## 実装概要
 
