@@ -48,7 +48,7 @@ services:
     environment:
       RUST_LOG: info
       # ホストで `cargo run` している perf_backend 向け（Linux は extra_hosts 必須）
-      PERF_PROXY_UPSTREAM: host.docker.internal:8080
+      PERF_PROXY_UPSTREAM: host.docker.internal:18080
       PERF_PROXY_UPSTREAM_HOST: host.docker.internal
       PERF_PROXY_HTTP_LISTEN: 0.0.0.0:9080
     extra_hosts:

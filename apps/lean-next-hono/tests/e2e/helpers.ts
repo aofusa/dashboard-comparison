@@ -88,7 +88,7 @@ export async function fetchAllItemTitlesViaRest(
         headers: { Authorization: `Bearer ${token}` },
       },
     );
-    await expectRestOkJson(res);
+    await expectRestOkJson(res as any);
     const body = (await res.json()) as { items: { title: string }[] };
     const items = body.items ?? [];
     out.push(...items.map((i) => i.title));

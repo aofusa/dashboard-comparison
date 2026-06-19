@@ -1,6 +1,7 @@
 # perf_pingora_proxy — HTTP/1.1 リバースプロキシ（Pingora）
-FROM rust:1.84-bookworm AS builder
+FROM rust:bookworm AS builder
 WORKDIR /build
+RUN apt-get update && apt-get install -y cmake
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release
