@@ -126,7 +126,6 @@ export BENCH_DUMP_AUTH_LOGIN=1
 
 - `benchmarks/scenarios/README.md` … flavor 要約・JSON スキーマの索引
 - `specs/dashboard-comparison.md` … 比較の読み方・ベンチとの関係
-- `specs/artifacts/dashboard-template-plan-vs-implement-gap_20260410.md` … 計画対現状ギャップ（最新版）
 
 ## ライセンス
 
